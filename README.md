@@ -1,5 +1,5 @@
 
-# 2025/2026
+# 2026/2027
 
 An introductory course on concurrent and distributed systems.
 
@@ -24,3 +24,12 @@ Finally, a third component provides a general introduction to abstract system mo
 - [Nuno Faria](https://nuno-faria.github.io/)
 - Francisco Neves
 
+## Materials
+
+- [Concurrent programming in Java tutorial](https://concjava.github.io/)
+- [Agent skill](https://github.com/distributedum/sd-skill)
+- [Sockets demonstrator](materials/sockets.html)
+
+## Past editions 
+
+- [2025/2026](editions/2025_2026/)

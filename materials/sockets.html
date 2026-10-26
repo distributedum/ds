@@ -1,0 +1,1809 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sockets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: control rail on the left; on the right, step narration above a stage that draws the pipeline top to bottom:
+   sender thread, send buffer, network, receive buffer, receiver thread. Bytes keep their stream offset as a stable id. */
+:root {
+  --bg: #ffffff; --panel: #ffffff; --ink: #222222; --muted: #6f6f6f; --line: #e5e5e5;
+  --box: #ececec; --accent: #267cb9; --accent-hover: #006699; --on-accent: #ffffff;
+  --node: #ffffff; --node-stroke: #444444; --slot-empty: #eff1f3; --edge: #9aa0a6; --dot: rgba(0, 0, 0, .08);
+  --cell-stroke: rgba(0, 0, 0, .28);
+  --visit: #2a66c9; --visit-bg: #e2ebfa;
+  --ok: #1d8048; --ok-bg: #dcf1e3;
+  --bad: #c3362b; --bad-bg: #fbe1de;
+  --found: #a86400; --found-bg: #fcecc9;
+  --split: #7448bd; --split-bg: #ece4f9;
+  --idle: #6f6f6f; --idle-bg: #f0f1f2;
+  /* message colours: one per write() call, cycling through 8 */
+  --m0: #e69f00; --m0-ink: #1d1400;
+  --m1: #2f7fc1; --m1-ink: #ffffff;
+  --m2: #f0e442; --m2-ink: #222222;
+  --m3: #009e73; --m3-ink: #ffffff;
+  --m4: #cc79a7; --m4-ink: #1f0a16;
+  --m5: #7cc3ef; --m5-ink: #0b1d29;
+  --m6: #d55e00; --m6-ink: #ffffff;
+  --m7: #8e6cc0; --m7-ink: #ffffff;
+  --font-display: "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-body: "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141619; --panel: #1b1e22; --ink: #e6e6e6; --muted: #9b9fa4; --line: #2e3238;
+    --box: #262a2f; --accent: #5aa9e6; --accent-hover: #80bdee; --on-accent: #0a1a27;
+    --node: #20242a; --node-stroke: #b0b5bb; --slot-empty: #1d2025; --edge: #61676e; --dot: rgba(255, 255, 255, .07);
+    --cell-stroke: rgba(0, 0, 0, .45);
+    --visit: #7eaaf6; --visit-bg: #1b2943;
+    --ok: #5dca8b; --ok-bg: #163222;
+    --bad: #f27c70; --bad-bg: #3d1c19;
+    --found: #f2b74e; --found-bg: #3a2b0f;
+    --split: #b597f2; --split-bg: #2a2142;
+    --idle: #9b9fa4; --idle-bg: #23272c;
+    --m0: #d39300; --m1: #3d8fd0; --m2: #d9ce3c; --m3: #12a57b;
+    --m4: #c873a3; --m5: #6db6e3; --m6: #d7692a; --m7: #9a7fd2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141619; --panel: #1b1e22; --ink: #e6e6e6; --muted: #9b9fa4; --line: #2e3238;
+  --box: #262a2f; --accent: #5aa9e6; --accent-hover: #80bdee; --on-accent: #0a1a27;
+  --node: #20242a; --node-stroke: #b0b5bb; --slot-empty: #1d2025; --edge: #61676e; --dot: rgba(255, 255, 255, .07);
+  --cell-stroke: rgba(0, 0, 0, .45);
+  --visit: #7eaaf6; --visit-bg: #1b2943;
+  --ok: #5dca8b; --ok-bg: #163222;
+  --bad: #f27c70; --bad-bg: #3d1c19;
+  --found: #f2b74e; --found-bg: #3a2b0f;
+  --split: #b597f2; --split-bg: #2a2142;
+  --idle: #9b9fa4; --idle-bg: #23272c;
+  --m0: #d39300; --m1: #3d8fd0; --m2: #d9ce3c; --m3: #12a57b;
+  --m4: #c873a3; --m5: #6db6e3; --m6: #d7692a; --m7: #9a7fd2;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font-body); }
+.wrap {
+  max-width: 1680px; margin: 0 auto;
+  padding-block: 20px 32px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+header.top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.brand { display: flex; align-items: flex-start; gap: 20px; min-width: 0; }
+.brand .logo { margin-top: 4px; }
+.brand .logo { display: block; flex: none; background: #ffffff; border-radius: 4px; line-height: 0; }
+.brand .logo img { width: 96px; height: auto; display: block; }
+.course { margin: 0 0 4px; font-size: 14px; color: var(--muted); }
+.course a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.course a:hover, .course a:focus-visible { color: var(--accent-hover); text-decoration: underline; }
+@media (max-width: 560px) { .brand .logo img { width: 64px; } }
+footer.credit { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; }
+footer.credit a { color: var(--accent); text-decoration: none; }
+footer.credit a:hover { text-decoration: underline; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(26px, 3vw, 36px); letter-spacing: -.02em; margin: 0; line-height: 1.1; text-wrap: balance; }
+.rules { margin: 6px 0 0; color: var(--muted); max-width: 96ch; min-height: 4.5em; }
+.rules b { color: var(--ink); font-family: var(--font-mono); font-weight: 600; }
+
+.layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.controls { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.card { background: transparent; border: 1px solid var(--box); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.card h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; font-weight: 600; }
+.card h3 { font-size: 14px; margin: 4px 0 0; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card h3:first-of-type { margin-top: 0; }
+.card hr { border: 0; border-top: 1px solid var(--box); margin: 2px 0; width: 100%; }
+label { font-weight: 500; font-size: 14px; }
+
+#msgInput { font: 500 18px var(--font-mono); padding: 9px 12px; border: 1.5px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); width: 100%; }
+#saveNote { font: 14px/1.4 var(--font-body); padding: 8px 10px; border: 1.5px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); width: 100%; resize: vertical; }
+#saveNote::placeholder { color: var(--muted); opacity: .7; }
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#msgInput::placeholder { color: var(--muted); opacity: .7; font: 400 15px var(--font-body); }
+input:focus-visible, button:focus-visible, select:focus-visible, #log li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.btnrow > button { flex: 1 1 auto; }
+button { font: 500 14px var(--font-body); padding: 9px 12px; border-radius: 8px; border: 1.5px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+button:disabled { opacity: .4; cursor: default; }
+.btnrow.small button { font-size: 13px; padding: 7px 8px; }
+.presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.presets button { padding: 8px 6px; }
+.presets button[aria-pressed="true"] { border-color: var(--found); color: var(--found); background: var(--found-bg); }
+button.pausebtn { font-size: 12px; padding: 3px 9px; border-radius: 999px; font-weight: 600; }
+button.pausebtn[aria-pressed="true"], button.pausebtn[aria-pressed="true"]:hover:not(:disabled) { background: var(--split-bg); border-color: var(--split); color: var(--split); }
+
+select { font: 14px var(--font-body); padding: 7px 8px; border-radius: 7px; border: 1.5px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > label { display: flex; justify-content: space-between; gap: 8px; }
+output { font-family: var(--font-mono); color: var(--muted); font-size: 13px; font-weight: 400; white-space: nowrap; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+.check { display: flex; gap: 8px; align-items: center; font-weight: 400; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1.5px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 8px; font-weight: 600; background: var(--panel); color: var(--muted); }
+.seg button + button { border-left: 1.5px solid var(--line); }
+.seg button[aria-pressed="true"], .seg button[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
+.msg { margin: 0; font-size: 14px; min-height: 1.5em; color: var(--muted); }
+.msg.err { color: var(--bad); }
+
+.stats dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.stats dl > div { display: flex; flex-direction: column; }
+.stats dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.stats dd { margin: 0; font: 600 22px var(--font-mono); font-variant-numeric: tabular-nums; }
+.stats dd.whole { color: var(--ok); } .stats dd.partial { color: var(--found); } .stats dd.mixed { color: var(--bad); }
+
+.board { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.stepbar { background: transparent; border: 1px solid var(--box); border-radius: 10px; padding: 12px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; align-items: start; }
+@media (max-width: 1100px) { .stepbar { grid-template-columns: minmax(0, 1fr); } }
+.stepnav { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.stepnav button { padding: 6px 8px; display: grid; place-items: center; }
+.stepnav svg { width: 18px; height: 18px; fill: currentColor; display: block; }
+#playBtn { padding: 6px 12px; }
+.stepnav { max-width: 300px; }
+#counter { flex-basis: 100%; font: 500 13px var(--font-mono); color: var(--muted); margin-top: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#counter .live { color: var(--ok); font-weight: 600; }
+#counter .replay { color: var(--found); font-weight: 600; }
+/* fixed height: a longer or shorter narration must not push the drawing up or down */
+#caption { margin: 0; font-size: 17px; min-width: 0; line-height: 1.45; height: 172px; overflow-y: auto; }
+#caption ul li { font-size: 15.5px; }
+#caption .tickno { font: 600 13px var(--font-mono); color: var(--muted); letter-spacing: .04em; display: block; margin-bottom: 2px; }
+#caption ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.stage {
+  background-color: transparent;
+  background-image: radial-gradient(var(--dot) 1.1px, transparent 1.4px);
+  background-size: 22px 22px;
+  border: 1px solid var(--box); border-radius: 10px;
+  min-height: 380px; overflow: auto; display: flex; padding: 12px;
+}
+#svg { margin: auto; display: block; flex: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+.legend .sw { display: inline-flex; gap: 1px; }
+.legend .sw i { border: 0; width: 10px; border-radius: 2px; }
+
+/* byte chips used in captions, history and log */
+.bytes { display: inline-flex; flex-wrap: wrap; gap: 1px; vertical-align: 1px; }
+.b { display: inline-block; min-width: 1.3em; padding: 0 2px; text-align: center; font: 600 .92em/1.45 var(--font-mono); border-radius: 3px; }
+.b.mid { min-width: 0; padding: 0 4px; }
+.b.pend { opacity: .35; }
+.b.c0 { background: var(--m0); color: var(--m0-ink); } .b.c1 { background: var(--m1); color: var(--m1-ink); }
+.b.c2 { background: var(--m2); color: var(--m2-ink); } .b.c3 { background: var(--m3); color: var(--m3-ink); }
+.b.c4 { background: var(--m4); color: var(--m4-ink); } .b.c5 { background: var(--m5); color: var(--m5-ink); }
+.b.c6 { background: var(--m6); color: var(--m6-ink); } .b.c7 { background: var(--m7); color: var(--m7-ink); }
+
+.panel { border: 1px solid var(--box); border-radius: 10px; padding: 12px 14px; }
+.panel h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.bneck { display: grid; grid-template-columns: minmax(9em, auto) auto minmax(120px, 1fr) auto; gap: 6px 14px; align-items: center; font-size: 14px; }
+.bneck .hd { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.bneck .cap { font: 600 15px var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.bneck .bar { height: 12px; border-radius: 6px; background: var(--slot-empty); position: relative; overflow: hidden; }
+.bneck .bar > span { position: absolute; inset: 0 auto 0 0; border-radius: 6px; }
+.bneck .bar.bad > span { background: var(--bad); } .bneck .bar.visit > span { background: var(--visit); }
+.bneck .bar > span.hdr { background: var(--node-stroke); }
+.legend i.hdr { background: var(--node-stroke); border-color: var(--node-stroke); }
+.bneck .bar.ok > span { background: var(--ok); }
+.bneck .meas { font: 13px var(--font-mono); color: var(--muted); white-space: nowrap; }
+.bneck .name.hot { font-weight: 700; color: var(--found); }
+.bneck-foot { margin: 10px 0 0; font-size: 14px; color: var(--muted); }
+.bneck-foot b { color: var(--ink); font-family: var(--font-mono); }
+
+.hist { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 1100px) { .hist { grid-template-columns: minmax(0, 1fr); } }
+.hist .panel { min-width: 0; }
+.hist ol { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
+.hist li { display: grid; grid-template-columns: 2.6em minmax(0, 1fr) auto; gap: 8px; padding: 4px 4px; align-items: center; border-top: 1px solid var(--box); font-size: 14px; }
+.hist li:first-child { border-top: 0; }
+.hist li .n { font: 12px var(--font-mono); color: var(--muted); text-align: right; }
+.hist li .meta { font: 12px var(--font-mono); color: var(--muted); white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+.hist .sub { margin: -4px 0 8px; font-size: 13px; color: var(--muted); }
+.hist .empty { color: var(--muted); font-style: italic; font-size: 14px; display: block; padding: 4px; }
+
+.logbox { position: relative; max-height: 260px; overflow: auto; background: transparent; border: 1px solid var(--box); border-radius: 10px; }
+.loghead { margin: 0; padding: 10px 14px 4px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+#log { list-style: none; margin: 0; padding: 4px 6px 8px; }
+#log li { display: grid; grid-template-columns: 3.4em 9.4em minmax(0, 1fr); gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; align-items: baseline; font-size: 14px; }
+#log li:hover { background: var(--bg); }
+#log li.active { background: var(--visit-bg); }
+#log .n { font: 12px var(--font-mono); color: var(--muted); text-align: right; }
+#log .tag { justify-self: start; }
+
+.tag { display: inline-block; font: 600 11px/1.6 var(--font-body); letter-spacing: .06em; text-transform: uppercase; padding: 0 7px; border-radius: 999px; vertical-align: 2px; border: 1px solid currentColor; white-space: nowrap; }
+#caption .tag { margin-right: 6px; }
+.t-visit { color: var(--visit); background: var(--visit-bg); }
+.t-ok { color: var(--ok); background: var(--ok-bg); }
+.t-bad { color: var(--bad); background: var(--bad-bg); }
+.t-split { color: var(--split); background: var(--split-bg); }
+.t-found { color: var(--found); background: var(--found-bg); }
+.t-info { color: var(--muted); background: var(--bg); }
+code, .code { font-family: var(--font-mono); font-size: .93em; }
+
+/* pipeline drawing */
+#svg text { font-family: var(--font-body); fill: var(--ink); }
+#svg .host { fill: none; stroke: var(--box); stroke-width: 1.5; }
+#svg .hosttitle { font-size: 12px; font-weight: 700; letter-spacing: .1em; fill: var(--muted); }
+#svg .hostplate { fill: var(--bg); }
+#svg .rowlab { font-size: 16px; font-weight: 600; }
+#svg .rowsub { font-size: 13px; fill: var(--muted); }
+#svg .rowsub.mono { font-family: var(--font-mono); font-size: 12.5px; }
+#svg .note { font-size: 13.5px; fill: var(--muted); }
+#svg .note .k { font-family: var(--font-mono); font-weight: 600; fill: var(--ink); }
+#svg .note .bad { fill: var(--bad); font-weight: 600; }
+#svg .note .ok { fill: var(--ok); font-weight: 600; }
+#svg .divider { stroke: var(--edge); stroke-dasharray: 3 5; stroke-width: 1; }
+#svg .divlab { font-size: 11.5px; fill: var(--muted); letter-spacing: .06em; text-anchor: end; }
+#svg .slot { fill: var(--slot-empty); }
+#svg .slotline { fill: none; stroke: var(--edge); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+#svg .bufframe { fill: none; stroke: var(--node-stroke); stroke-width: 1.5; }
+#svg .bufframe.s-visit { stroke: var(--visit); stroke-width: 3; }
+#svg .bufframe.s-ok { stroke: var(--ok); stroke-width: 3; }
+#svg .bufframe.s-bad { stroke: var(--bad); stroke-width: 3; }
+#svg .bufframe.s-found { stroke: var(--found); stroke-width: 3; }
+#svg .bufframe.s-split { stroke: var(--split); stroke-width: 3; }
+#svg .bufframe.thin { stroke-opacity: .45; stroke-width: 1; }
+#svg .idx { font: 10px var(--font-mono); fill: var(--muted); text-anchor: middle; }
+#svg .cell { stroke: var(--cell-stroke); stroke-width: 1; }
+#svg .ct { font-family: var(--font-mono); font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+#svg .cell.c0 { fill: var(--m0); } #svg .ct.c0 { fill: var(--m0-ink); }
+#svg .cell.c1 { fill: var(--m1); } #svg .ct.c1 { fill: var(--m1-ink); }
+#svg .cell.c2 { fill: var(--m2); } #svg .ct.c2 { fill: var(--m2-ink); }
+#svg .cell.c3 { fill: var(--m3); } #svg .ct.c3 { fill: var(--m3-ink); }
+#svg .cell.c4 { fill: var(--m4); } #svg .ct.c4 { fill: var(--m4-ink); }
+#svg .cell.c5 { fill: var(--m5); } #svg .ct.c5 { fill: var(--m5-ink); }
+#svg .cell.c6 { fill: var(--m6); } #svg .ct.c6 { fill: var(--m6-ink); }
+#svg .cell.c7 { fill: var(--m7); } #svg .ct.c7 { fill: var(--m7-ink); }
+#svg .byte.ghost .cell { fill-opacity: .28; stroke-dasharray: 3 2; stroke: var(--edge); }
+#svg .byte.ghost .ct { fill: var(--muted); }
+#svg .byte.hot .cell { stroke: var(--found); stroke-width: 3; }
+#svg .boundary { stroke: var(--bad); stroke-width: 3.5; stroke-linecap: round; }
+#svg .segframe { fill: var(--visit-bg); stroke: var(--visit); stroke-width: 1.8; }
+#svg .segframe.tx { stroke-dasharray: 5 3; }
+#svg .strchip { stroke: var(--cell-stroke); }
+#svg .strch { font-size: 19px; font-weight: 500; }
+#svg .caret { fill: var(--found); }
+#svg .hdrcell { fill: var(--node-stroke); }
+#svg .hdrtxt { font-family: var(--font-mono); font-weight: 600; fill: var(--bg); text-anchor: middle; dominant-baseline: central; }
+#svg .zonesep { stroke: var(--edge); stroke-width: 2; }
+#svg .zonelab { font-size: 11.5px; fill: var(--muted); letter-spacing: .05em; }
+#svg .txbar { fill: var(--slot-empty); } #svg .txbar.done { fill: var(--visit); }
+#svg .ackchip { fill: var(--split-bg); stroke: var(--split); stroke-width: 1.5; }
+#svg .ackchip.zero { fill: var(--bad-bg); stroke: var(--bad); }
+#svg .acktxt { font: 600 12px var(--font-mono); fill: var(--split); text-anchor: middle; dominant-baseline: central; }
+#svg .acktxt.zero { fill: var(--bad); }
+#svg .cable { stroke: var(--edge); stroke-width: 5; stroke-linecap: round; opacity: .55; }
+#svg .cable.down { stroke: var(--bad); stroke-dasharray: 10 8; opacity: .8; }
+#svg .acklane { stroke: var(--split); stroke-width: 1.5; stroke-dasharray: 5 5; opacity: .7; fill: none; }
+#svg .conn { stroke: var(--edge); stroke-width: 1.6; fill: none; }
+#svg .arrowhead { fill: var(--edge); }
+#svg .ackhead { fill: var(--split); }
+#svg .hit { fill: transparent; cursor: pointer; }
+#svg .clickable:hover .codebox, #svg .clickable:hover .cable { filter: brightness(1.05); }
+#svg .codebox { fill: none; stroke: var(--line); stroke-width: 1.5; }
+#svg .code { font: 13.5px var(--font-mono); white-space: pre; }
+#svg .code .cm { fill: var(--muted); }
+#svg .code .kw { fill: var(--accent); }
+#svg .ln { font: 11px var(--font-mono); fill: var(--muted); text-anchor: end; }
+#svg .curline { stroke: none; }
+#svg .curmark { font: 12px var(--font-mono); }
+#svg .badge rect { stroke-width: 1.5; }
+#svg .badge text { font: 700 11.5px var(--font-body); letter-spacing: .07em; dominant-baseline: central; }
+#svg .hintclick { font-size: 12px; fill: var(--muted); text-anchor: end; }
+#svg .netlab { font: 600 13px var(--font-body); text-anchor: middle; }
+#svg .st-run .codebox, #svg .st-sleep .codebox { stroke: var(--ok); }
+#svg .st-run .curline, #svg .st-sleep .curline { fill: var(--ok-bg); } #svg .st-run .curmark, #svg .st-sleep .curmark { fill: var(--ok); }
+#svg .st-run .badge rect, #svg .st-sleep .badge rect { fill: var(--ok-bg); stroke: var(--ok); } #svg .st-run .badge text, #svg .st-sleep .badge text { fill: var(--ok); }
+#svg .st-blocked .codebox { stroke: var(--bad); stroke-width: 3; }
+#svg .st-blocked .curline { fill: var(--bad-bg); } #svg .st-blocked .curmark { fill: var(--bad); }
+#svg .st-blocked .badge rect { fill: var(--bad-bg); stroke: var(--bad); } #svg .st-blocked .badge text { fill: var(--bad); }
+#svg .st-idle .codebox { stroke: var(--edge); }
+#svg .st-idle .curline { fill: var(--idle-bg); } #svg .st-idle .curmark { fill: var(--idle); }
+#svg .st-idle .badge rect { fill: var(--idle-bg); stroke: var(--idle); } #svg .st-idle .badge text { fill: var(--idle); }
+#svg .st-paused .codebox { stroke: var(--split); stroke-width: 3; stroke-dasharray: 8 5; }
+#svg .st-paused .curline { fill: var(--split-bg); } #svg .st-paused .curmark { fill: var(--split); }
+#svg .st-paused .badge rect { fill: var(--split-bg); stroke: var(--split); } #svg .st-paused .badge text { fill: var(--split); }
+#svg .netpaused { font: 700 12px var(--font-body); fill: var(--split); letter-spacing: .07em; text-anchor: middle; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <a class="logo" href="https://distributedum.github.io/ds/" title="Distributed Systems course page"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAaUAAAFICAMAAADH1hHAAAAA0mVYSWZJSSoACAAAAAoAAAEEAAEAAAClAQAAAQEEAAEAAABIAQAAAgEDAAMAAACGAAAAEgEDAAEAAAABAAAAGgEFAAEAAACMAAAAGwEFAAEAAACUAAAAKAEDAAEAAAACAAAAMQECAA8AAACcAAAAMgECABQAAACsAAAAaYcEAAEAAADAAAAAAAAAAAgACAAIAEgAAAABAAAASAAAAAEAAABHSU1QIDMuMC4wLVJDMgAAMjAyNTowMToxOCAyMDo1NDoyMAABAAGgAwABAAAAAQAAAAAAAACGG2U6AAABfmlDQ1BJQ0MgcHJvZmlsZQAAeJx9kTtIA0EURc9uFEWUgKYQsdhCrbTxh2AToxCECCEqJGrhfkwMZDdhN8EmpWAbsPDTGLWwsdbWwlYQBD8g9oKVoo2ElckGEsT4mjncefcx7w7I5YxuOi1BMK28HQuHlHhiRWl7RaKbABNMq7qTm4lGIzStr3skcd6NiFnN+/6sLmPD0UFSgKCes/MgrQOTW/mc4H0goG+qBkjnwLAdT6yA9Ch0zeM3wakqy2JmwF6KzYIcAJRUA2sNrG/aJsjjwIBhWgbIcY8NwUXBZqag194pNuzcsJYXhQ70E2aeBaIoaBRIkyHPCGksFBxihAk18fdV/VEKaGRIo6MwRxYTtepH/MHvbJ3k2Kg3qTMErS+u+zEIbbtQKbnu97HrVk7A9wxXVt2fLcPUJ/hKdW3gCPzbcHFd17Q9uNyB3qecaqtVyQfIySS8n0FXAnpuoWPVy612z+kDLBUhcgMHhzCUAv9ak73bG3P7t6eW3w8ZKnLpf5uDuAAADXppVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+Cjx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IlhNUCBDb3JlIDQuNC4wLUV4aXYyIj4KIDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+CiAgPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIKICAgIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIgogICAgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIKICAgIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIKICAgIHhtbG5zOkdJTVA9Imh0dHA6Ly93d3cuZ2ltcC5vcmcveG1wLyIKICAgIHhtbG5zOnRpZmY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vdGlmZi8xLjAvIgogICAgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIgogICB4bXBNTTpEb2N1bWVudElEPSJnaW1wOmRvY2lkOmdpbXA6OTNiMzc4ZTgtN2EzYS00YzFmLWI0ZDEtZWVjYjI1NDk2M2JiIgogICB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjdjM2JmNjgyLTEyOWItNDIxZS04NTg3LThmYjRkOTczMTc2OSIKICAgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjk2MjYzYjQyLTU3N2EtNDg4MC1iNGE2LWE0ZTljNjdlNTY2NiIKICAgZGM6Rm9ybWF0PSJpbWFnZS9wbmciCiAgIEdJTVA6QVBJPSIzLjAiCiAgIEdJTVA6UGxhdGZvcm09IkxpbnV4IgogICBHSU1QOlRpbWVTdGFtcD0iMTczNzIzMzY2MjQxMjM1MyIKICAgR0lNUDpWZXJzaW9uPSIzLjAuMC1SQzIiCiAgIHRpZmY6T3JpZW50YXRpb249IjEiCiAgIHhtcDpDcmVhdG9yVG9vbD0iR0lNUCIKICAgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNTowMToxOFQyMDo1NDoyMCswMDowMCIKICAgeG1wOk1vZGlmeURhdGU9IjIwMjU6MDE6MThUMjA6NTQ6MjArMDA6MDAiPgogICA8eG1wTU06SGlzdG9yeT4KICAgIDxyZGY6U2VxPgogICAgIDxyZGY6bGkKICAgICAgc3RFdnQ6YWN0aW9uPSJzYXZlZCIKICAgICAgc3RFdnQ6Y2hhbmdlZD0iLyIKICAgICAgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDoxODM0ODVhMy05ZjdmLTQ0MWQtYjc5ZC1hNjA2NzRjYzQxZjciCiAgICAgIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkdJTVAgMy4wLjAtUkMyIChMaW51eCkiCiAgICAgIHN0RXZ0OndoZW49IjIwMjUtMDEtMThUMjA6NTQ6MjIrMDA6MDAiLz4KICAgIDwvcmRmOlNlcT4KICAgPC94bXBNTTpIaXN0b3J5PgogIDwvcmRmOkRlc2NyaXB0aW9uPgogPC9yZGY6UkRGPgo8L3g6eG1wbWV0YT4KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgIAo8P3hwYWNrZXQgZW5kPSJ3Ij8+RU8QCAAAAwBQTFRFAAAAAQEBAgICAwMDBAQEBQUFBgYGBwcHCAgICQkJCgoKCwsLDAwMDQ0NDg4ODw8PEBAQEREREhISExMTFBQUFRUVFhYWFxcXGBgYGRkZGhoaGxsbHBwcHR0dHh4eHx8fICAgISEhIiIiIyMjJCQkJSUlJiYmJycnKCgoKSkpKioqKysrLCwsLS0tLi4uLy8vMDAwMTExMjIyMzMzNDQ0NTU1NjY2Nzc3ODg4OTk5Ojo6Ozs7PDw8PT09Pj4+Pz8/QEBAQUFBQkJCQ0NDRERERUVFRkZGR0dHSEhISUlJSkpKS0tLTExMTU1NTk5OT09PUFBQUVFRUlJSU1NTVFRUVVVVVlZWV1dXWFhYWVlZWlpaW1tbXFxcXV1dXl5eX19fYGBgYWFhYmJiY2NjZGRkZWVlZmZmZ2dnaGhoaWlpampqa2trbGxsbW1tbm5ub29vcHBwcXFxcnJyc3NzdHR0dXV1dnZ2d3d3eHh4eXl5enp6e3t7fHx8fX19fn5+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" alt="Universidade do Minho"></a>
+      <div>
+        <p class="course"><a href="https://distributedum.github.io/ds/">Distributed Systems</a> · Bachelor in Informatics Engineering</p>
+        <h1>Sockets</h1>
+        <p class="rules" id="rules"></p>
+      </div>
+    </div>
+    <button id="themeBtn" type="button">Dark mode</button>
+  </header>
+
+  <main class="layout">
+    <aside class="controls">
+      <section class="card">
+        <h2>Bottleneck scenarios</h2>
+        <div class="presets">
+          <button type="button" data-preset="reader">Slow reader</button>
+          <button type="button" data-preset="network">Slow network</button>
+          <button type="button" data-preset="writer">Slow writer</button>
+          <button type="button" data-preset="lfn">Long fat pipe</button>
+        </div>
+        <p class="hint">Each scenario sets the throttles below and continues from the tick on screen.</p>
+        <div class="btnrow small">
+          <button id="undoBtn" type="button" title="Undo the last change (Ctrl+Z)">Undo</button>
+          <button id="restartBtn" type="button" title="Start a new, empty connection at tick 0">Restart at tick 0</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Save and share</h2>
+        <label for="saveNote">Note or question, saved in the file</label>
+        <textarea id="saveNote" rows="2" placeholder="e.g. Why does read() return only 2 bytes at tick 37?"></textarea>
+        <div class="btnrow">
+          <button id="saveBtn" type="button">Save to file</button>
+          <button id="openBtn" type="button">Open file…</button>
+        </div>
+        <input type="file" id="openFile" accept=".json,application/json" hidden>
+        <p class="hint">The file holds the whole run and the step on screen, so whoever opens it can step back and forth from there. You can also drop a file onto the page.</p>
+        <p id="fileMsg" class="msg" role="status"></p>
+      </section>
+
+      <section class="card">
+        <h2>Throttles</h2>
+        <h3>Sender thread <button class="pausebtn" id="pauseSnd" type="button" aria-pressed="false">Pause</button></h3>
+        <div class="field">
+          <label for="sndPause"><span id="sndPauseLab">Work before each message</span> <output id="sndPauseOut"></output></label>
+          <input type="range" id="sndPause" min="0" max="10" step="1">
+        </div>
+        <hr>
+        <h3>Network <button class="pausebtn" id="pauseNet" type="button" aria-pressed="false">Pause</button></h3>
+        <div class="field">
+          <label for="bw">Bandwidth <output id="bwOut"></output></label>
+          <input type="range" id="bw" min="0" max="8" step="1">
+        </div>
+        <div class="field">
+          <label for="lat">Latency (one way) <output id="latOut"></output></label>
+          <input type="range" id="lat" min="1" max="8" step="1">
+        </div>
+        <div class="field">
+          <label for="mss">Max segment size (MSS) <output id="mssOut"></output></label>
+          <input type="range" id="mss" min="1" max="12" step="1">
+        </div>
+        <div class="field">
+          <label for="hdr">Header per packet <output id="hdrOut"></output></label>
+          <input type="range" id="hdr" min="0" max="8" step="1">
+        </div>
+        <hr>
+        <h3>Receiver thread <button class="pausebtn" id="pauseRcv" type="button" aria-pressed="false">Pause</button></h3>
+        <div class="field">
+          <label for="rcvPause">Work after each read <output id="rcvPauseOut"></output></label>
+          <input type="range" id="rcvPause" min="0" max="10" step="1">
+        </div>
+        <div class="field">
+          <label for="readSize"><span id="readSizeLab">read() buffer size</span> <output id="readSizeOut"></output></label>
+          <input type="range" id="readSize" min="1" max="16" step="1">
+        </div>
+        <p class="hint">You can also click a thread or the cable in the drawing, or press <b>S</b>, <b>N</b> or <b>R</b>, to pause or resume it.</p>
+      </section>
+
+      <section class="card">
+        <h2>Messages</h2>
+        <label for="msgInput">Text to write</label>
+        <input id="msgInput" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. hello  ·  put x 42  ·  a b c">
+        <div class="btnrow">
+          <button id="writeBtn" class="primary" type="button">Queue write()</button>
+          <button id="rnd1" type="button">+1 random</button>
+          <button id="rnd5" type="button">+5 random</button>
+        </div>
+        <p class="hint">Each word becomes one write() call, ending in a newline <span class="code">↵</span>. Max 16 characters per word.</p>
+        <p id="msg" class="msg" role="status"></p>
+        <label class="check"><input type="checkbox" id="autoChk"> Keep writing random messages</label>
+        <div class="field">
+          <label for="lenSel">Random message length</label>
+          <select id="lenSel">
+            <option value="short">Short (2–4 characters)</option>
+            <option value="medium">Medium (4–7 characters)</option>
+            <option value="long">Long (8–12 characters)</option>
+            <option value="mixed">Mixed (2–12 characters)</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Socket and protocol</h2>
+        <div class="field">
+          <label for="sndBuf">Send buffer (SO_SNDBUF) <output id="sndBufOut"></output></label>
+          <input type="range" id="sndBuf" min="4" max="24" step="1">
+        </div>
+        <div class="field">
+          <label for="rcvBuf">Receive buffer (SO_RCVBUF) <output id="rcvBufOut"></output></label>
+          <input type="range" id="rcvBuf" min="4" max="24" step="1">
+        </div>
+        <div class="field">
+          <label for="modeSel">Application code</label>
+          <select id="modeSel">
+            <option value="raw">Unbuffered: the socket's streams, in.read(buf)</option>
+            <option value="buffered">Buffered: BufferedOutputStream, BufferedReader.readLine()</option>
+          </select>
+        </div>
+        <div id="bufOpts" class="field" hidden>
+          <label for="bwSize">BufferedOutputStream size <output id="bwSizeOut"></output></label>
+          <input type="range" id="bwSize" min="2" max="16" step="1">
+        </div>
+        <div class="field">
+          <label for="writeSel">The sender writes each message</label>
+          <select id="writeSel">
+            <option value="whole">whole: out.write(m.getBytes())</option>
+            <option value="char">one byte at a time: out.write(c) in a loop</option>
+          </select>
+          <p class="hint">One char is one byte. The buffer size and how the sender writes apply from the current tick.</p>
+        </div>
+        <div class="field">
+          <label for="ackSel">Send buffer frees a byte</label>
+          <select id="ackSel">
+            <option value="sent">when it is transmitted (simplified)</option>
+            <option value="acked">when it is acknowledged (real TCP)</option>
+          </select>
+        </div>
+        <p class="hint">Changing the buffer sizes, the application code or the ACK rule restarts the connection and replays the same number of ticks.</p>
+      </section>
+
+      <section class="card">
+        <h2>Display</h2>
+        <div class="field">
+          <label>Each step shows</label>
+          <div class="seg" role="group" aria-label="Step granularity">
+            <button id="byTick" type="button" aria-pressed="false">One tick</button>
+            <button id="byEvent" type="button" aria-pressed="true">One event</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="speed">Time per step <output id="speedOut">0.8 s</output></label>
+          <input type="range" id="speed" min="150" max="2500" step="50" value="800">
+        </div>
+        <div class="field">
+          <label for="zoom">Zoom <output id="zoomOut">100%</output></label>
+          <input type="range" id="zoom" min="50" max="200" step="10" value="100">
+        </div>
+      </section>
+
+      <section class="card stats">
+        <h2>Totals so far</h2>
+        <dl>
+          <div><dt>Tick</dt><dd id="stTick">0</dd></div>
+          <div><dt>Written</dt><dd id="stW">0</dd></div>
+          <div><dt>On wire</dt><dd id="stFly">0</dd></div>
+          <div><dt>Read</dt><dd id="stR">0</dd></div>
+        </dl>
+        <dl>
+          <div><dt>write()s</dt><dd id="stWrites">0</dd></div>
+          <div><dt>read()s</dt><dd id="stReads">0</dd></div>
+        </dl>
+        <dl>
+          <div><dt>1 msg</dt><dd id="stWhole" class="whole">0</dd></div>
+          <div><dt>Partial</dt><dd id="stPart" class="partial">0</dd></div>
+          <div><dt>Mixed</dt><dd id="stMix" class="mixed">0</dd></div>
+        </dl>
+        <p class="hint">The first row counts bytes, the second system calls. A read() is “1 msg” only if it returned exactly one whole message.</p>
+      </section>
+    </aside>
+
+    <section class="board">
+      <div class="stepbar">
+        <div class="stepnav">
+          <button id="firstBtn" type="button" aria-label="First step" title="First step (tick 0)"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+          <button id="prevBtn" type="button" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M16 5v14L5 12z"/></svg></button>
+          <button id="playBtn" type="button" aria-label="Play" title="Play / pause (Space)"><svg viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></svg></button>
+          <button id="nextBtn" type="button" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+          <button id="lastBtn" type="button" aria-label="Latest step" title="Jump to the latest recorded step"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+          <button id="ffBtn" type="button" aria-label="Run 10 ticks" title="Run 10 more ticks at once"><svg viewBox="0 0 24 24"><path d="M3 5v14l9-7zM12 5v14l9-7z"/></svg></button>
+          <span id="counter"></span>
+        </div>
+        <div id="caption" aria-live="polite"></div>
+      </div>
+
+      <div class="stage" id="stage"><svg id="svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sender, network and receiver with their buffers"></svg></div>
+
+      <div class="legend">
+        <span><span class="sw"><i style="background:var(--m0)"></i><i style="background:var(--m1)"></i><i style="background:var(--m2)"></i><i style="background:var(--m3)"></i><i style="background:var(--m4)"></i></span>Byte colour = the message it belongs to</span>
+        <span><i style="background:var(--ok-bg);border-color:var(--ok)"></i>Thread running</span>
+        <span><i style="background:var(--bad-bg);border-color:var(--bad)"></i>Blocked / zero window</span>
+        <span><i style="background:var(--split-bg);border-color:var(--split)"></i>Paused · ACK</span>
+        <span><i style="background:var(--idle-bg);border-color:var(--idle)"></i>Waiting for work</span>
+        <span><i style="background:var(--visit-bg);border-color:var(--visit)"></i>Segment in flight</span>
+        <span><i class="hdr"></i>Packet header (with sequence number)</span>
+        <span><i style="background:var(--found-bg);border-color:var(--found)"></i>Bytes in focus</span>
+        <span><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><line x1="8" y1="1" x2="8" y2="15" stroke="var(--bad)" stroke-width="3.5" stroke-linecap="round"/></svg>Message boundary inside one read()</span>
+        <span id="legendGhost" hidden><i style="background:transparent;border-color:var(--edge);border-style:dashed"></i>Sent, awaiting ACK</span>
+      </div>
+
+      <div class="panel">
+        <h2>Where is the bottleneck?</h2>
+        <div class="bneck" id="bneck"></div>
+        <p class="bneck-foot" id="bneckFoot"></p>
+        <p class="bneck-foot" id="wireEff"></p>
+      </div>
+
+      <div class="hist">
+        <div class="panel">
+          <h2 id="wlistHead">Sender: each write() call</h2>
+          <p class="sub" id="wlistSub"></p>
+          <ol id="wlist"></ol>
+        </div>
+        <div class="panel">
+          <h2 id="rlistHead">Receiver: what each read() returned</h2>
+          <p class="sub" id="rlistSub"></p>
+          <ol id="rlist"></ol>
+        </div>
+      </div>
+
+      <div class="logbox" id="logBox">
+        <p class="loghead">Events around this tick</p>
+        <ol id="log"></ol>
+      </div>
+    </section>
+  </main>
+
+  <footer class="credit">
+    <span><a href="https://distributedum.github.io/ds/">Distributed Systems</a> · Universidade do Minho</span>
+    <span>Built with Claude, Anthropic's AI assistant.</span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  // ---------- socket core ----------
+  // Time advances in ticks. Each tick: segments and ACKs whose latency has elapsed arrive, the receiver thread acts,
+  // the sender thread acts, TCP transmits what bandwidth and the advertised window allow, and the receiver ACKs.
+  const RATES = [[1, 4], [1, 3], [1, 2], [1, 1], [2, 1], [3, 1], [4, 1], [6, 1], [8, 1]];
+  const rateVal = i => RATES[i][0] / RATES[i][1];
+  const rateText = i => RATES[i][1] === 1 ? `${RATES[i][0]} B/tick` : `1 B per ${RATES[i][1]} ticks`;
+  const WORDS = ['ok', 'hi', 'go', 'ack', 'get', 'put', 'fin', 'syn', 'ping', 'pong', 'data', 'byte', 'send', 'recv',
+    'hello', 'world', 'queue', 'reply', 'bytes', 'socket', 'thread', 'buffer', 'stream', 'packet', 'server', 'client',
+    'message', 'network', 'receive', 'latency', 'process', 'blocking', 'transmit', 'protocol', 'segments', 'datagram',
+    'bandwidth', 'handshake', 'throughput', 'connection', 'distributed', 'acknowledge', 'backpressure', 'multiplexing'];
+  const LENS = { short: [2, 4], medium: [4, 7], long: [8, 12], mixed: [2, 12] };
+  const MAXWORD = 16;
+  const wordPool = P => WORDS.filter(w => w.length >= LENS[P.msgLen][0] && w.length <= LENS[P.msgLen][1]);
+  const avgLen = P => { const p = wordPool(P); return p.reduce((a, w) => a + w.length + 1, 0) / p.length; };
+  const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const esc = ch => ch === '\n' ? '↵' : ch === ' ' ? '·' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '&' ? '&amp;' : ch;
+  const B = bytes => `<span class="bytes">${bytes.map(b => `<span class="b c${b.m % 8}">${esc(b.c)}</span>`).join('')}</span>`;
+  const M = id => `<span class="b mid c${id % 8}">#${id}</span>`;
+  const text = bytes => bytes.map(b => b.c === '\n' ? '' : esc(b.c)).join('');
+
+  function rand(sim) { // mulberry32; the state lives in the simulation so a replay generates the same messages
+    let a = sim.seed = (sim.seed + 0x6D2B79F5) | 0;
+    a = Math.imul(a ^ (a >>> 15), a | 1);
+    a ^= a + Math.imul(a ^ (a >>> 7), a | 61);
+    return ((a ^ (a >>> 14)) >>> 0) / 4294967296;
+  }
+  function randomWord(sim, P) {
+    const p = wordPool(P);
+    let w = p[Math.floor(rand(sim) * p.length)];
+    if (w === sim.lastWord) w = p[(p.indexOf(w) + 1 + Math.floor(rand(sim) * (p.length - 1))) % p.length];
+    return sim.lastWord = w;
+  }
+
+  function newSim(P, seed) {
+    return {
+      t: 0, seed, nMsg: 0, nByte: 0, queue: [], lastWord: '',
+      snd: { st: 'run', sleep: 0, total: 0, cur: null, prev: null, bw: [], sys: null }, nSys: 0,
+      sbuf: [], sndUna: 0, sndNxt: 0, rwnd: P.rcvBuf, tx: null, txWhy: '', stall: false, netDown: false,
+      wire: [], acks: [], nSeg: 0, nAck: 0, lastArr: 0, lastAckArr: 0,
+      rbuf: [], rcvNxt: 0, advWin: P.rcvBuf,
+      rcv: { st: 'run', sleep: 0, total: 0, buf: [], pend: [], sb: [], line: null },
+      c: { writes: 0, wBytes: 0, reads: 0, rBytes: 0, whole: 0, partial: 0, mixed: 0, lines: 0, kBytes: 0, wsys: 0, sent: 0, cap: 0, busy: 0, busyH: 0, hdrB: 0, segs: 0, acks: 0, ackB: 0,
+           sBlk: 0, rBlk: 0, stallT: 0, sPau: 0, rPau: 0, sIdle: 0 }
+    };
+  }
+  // bytes, segments and ACKs are never mutated once created, so arrays of them can be copied shallowly
+  function cloneSim(s) {
+    return {
+      ...s, queue: s.queue.slice(),
+      snd: { ...s.snd, bw: s.snd.bw.slice(), cur: s.snd.cur && { ...s.snd.cur } },
+      sbuf: s.sbuf.slice(), wire: s.wire.slice(), acks: s.acks.slice(), rbuf: s.rbuf.slice(),
+      rcv: { ...s.rcv, buf: s.rcv.buf.slice(), pend: s.rcv.pend.slice(), sb: s.rcv.sb.slice() }, c: { ...s.c }
+    };
+  }
+
+  function classify(bytes) {
+    const m = bytes[0].m;
+    if (bytes.some(b => b.m !== m)) return 'mixed';
+    return bytes[0].k === 0 && bytes[bytes.length - 1].last ? 'whole' : 'partial';
+  }
+  function describe(bytes) {
+    const ids = [...new Set(bytes.map(b => b.m))];
+    const parts = ids.map(id => {
+      const bs = bytes.filter(b => b.m === id), a = bs[0].k === 0, z = bs[bs.length - 1].last;
+      return `${a && z ? 'all of' : a ? 'the start of' : z ? 'the end of' : 'the middle of'} message ${M(id)}`;
+    });
+    return parts.length === 1 ? parts[0] : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+  }
+  const U = 12;   // link work is counted in twelfths of a byte, so every bandwidth setting is a whole number per tick
+  const allowance = sim => Math.max(0, sim.sndUna + sim.rwnd - sim.sndNxt);
+  const unsentStart = (sim, P) => P.keepUnacked ? sim.sndNxt - sim.sndUna : 0;
+  const unsentCount = (sim, P) => sim.sbuf.length - unsentStart(sim, P);
+  const onWire = sim => sim.wire.reduce((a, g) => a + g.bytes.length, 0) + (sim.tx ? sim.tx.bytes.length : 0);
+
+  // a thread that works for k ticks after an operation is 'sleep' with a countdown; a smaller setting cuts it short
+  function sleeping(th, limit) {
+    if (th.st !== 'sleep') return false;
+    th.sleep = Math.min(th.sleep, limit); th.total = Math.min(th.total, limit);
+    if (th.sleep > 0) { th.sleep--; return true; }
+    th.st = 'run';
+    return false;
+  }
+
+  function receiverPhase(sim, P, H, e) {
+    const r = sim.rcv, c = sim.c, t = sim.t, R = P.readSize;
+    if (P.rcvPaused) {
+      if (r.st !== 'paused') { r.st = 'paused'; e('pause', 'The receiver thread is paused (think of a breakpoint, or a long GC pause). It does not call read() until it resumes.', { rcv: 'split' }); }
+      c.rPau++; return;
+    }
+    if (r.st === 'paused') { r.st = 'run'; r.sleep = 0; e('resume', 'The receiver thread resumes.', { rcv: 'ok' }); }
+    if (sleeping(r, P.rcvPause)) return;
+    const after = P.rcvPause ? ` It then works ${pl(P.rcvPause, 'tick')} on the data.` : '';
+    const done = () => { r.st = P.rcvPause > 0 ? 'sleep' : 'run'; r.sleep = r.total = P.rcvPause; };
+    if (P.mode === 'buffered') { readLineStep(sim, P, H, e, after, done); return; }
+    const avail = sim.rbuf.length;
+    if (!avail) {
+      if (r.st !== 'blocked') {
+        r.st = 'blocked';
+        e('rblock', 'in.read(buf) finds the receive buffer empty, so the receiver thread blocks until data arrives.', { rcv: 'bad' });
+      }
+      c.rBlk++; return;
+    }
+    const woke = r.st === 'blocked';
+    const got = sim.rbuf.splice(0, Math.min(R, avail));
+    const cls = classify(got);
+    c.reads++; c.rBytes += got.length; c[cls]++;
+    H.reads.push({ t, bytes: got, cls });
+    const how = got.length < avail ? `${got.length} of the ${avail} available bytes (buf has room for only ${R})`
+              : got.length === 1 ? 'the only available byte' : `all ${got.length} available bytes`;
+    const lead = woke ? `Data has arrived, so the blocked read() returns ${how}` : `read() returns ${how}`;
+    r.buf = got; done();
+    const moral = cls === 'mixed' ? ' A single read() mixed bytes from different write() calls.'
+                : cls === 'partial' ? (got[got.length - 1].last ? ' Earlier read() calls returned the rest of it.' : ' The rest of the message needs more read() calls.')
+                : ' This time it is exactly one message, but nothing guarantees that.';
+    e('read_' + cls, `${lead}: ${B(got)}, which is ${describe(got)}.${moral}${after}`, { rrow: cls === 'mixed' ? 'bad' : cls === 'whole' ? 'ok' : 'found' }, got.map(b => b.s));
+  }
+
+  // The sender runs one of four programs: writing to the socket's stream directly or through a BufferedOutputStream,
+  // and each message whole (out.write(m.getBytes())) or one byte at a time (out.write(c) in a loop). One char is one
+  // byte. The thread makes one call on its stream per tick: out.write(c), out.write(m.getBytes()) or out.flush().
+  // A write() system call blocks while the send buffer is full. The String m keeps its bytes (write() copies them);
+  // the BufferedOutputStream's buffer gives its bytes up as they are copied into the kernel.
+  // readLine() moves bytes from the BufferedReader's buffer into the line it is building (a StringBuilder), up to the
+  // ↵, and calls read() to refill that buffer only once it is empty. It cannot see bytes it has not read() yet.
+  function readLineStep(sim, P, H, e, after, done) {
+    const r = sim.rcv, c = sim.c, t = sim.t;
+    let lead = '', got = null, cls = '';
+    if (!r.pend.length) {
+      const avail = sim.rbuf.length;
+      if (!avail) {
+        if (r.st !== 'blocked') {
+          r.st = 'blocked';
+          e('rblock', `readLine()${r.sb.length ? ` has “${text(r.sb)}” so far and` : ''} needs more bytes. The BufferedReader's buffer is empty, so it calls read(); the receive buffer is empty too, so the receiver thread blocks until data arrives.`, { rcv: 'bad' });
+        }
+        c.rBlk++; return;
+      }
+      const woke = r.st === 'blocked';
+      got = sim.rbuf.splice(0, Math.min(P.readSize, avail)); cls = classify(got);
+      c.reads++; c.rBytes += got.length; c[cls]++;
+      H.reads.push({ t, bytes: got, cls });
+      r.pend = got;
+      lead = `${woke ? 'Data has arrived, so the blocked read()' : "The BufferedReader's buffer is empty, so readLine() calls read(), which"} fills it with ${B(got)}${got.length < avail ? ` (room for only ${P.readSize} of the ${avail} available bytes)` : ''}. `;
+    }
+    const nl = r.pend.findIndex(b => b.c === '\n');
+    const take = nl >= 0 ? r.pend.slice(0, nl + 1) : r.pend;
+    r.pend = nl >= 0 ? r.pend.slice(nl + 1) : [];
+    r.sb = r.sb.concat(take.filter(b => b.c !== '\n'));
+    if (nl < 0) {
+      r.st = 'run';
+      e(got ? 'read_' + cls : 'scan', `${lead}readLine() moves ${B(take)} out of its buffer into the line it is building: “${text(r.sb)}” so far, and no ↵ yet.`, { rrow: 'found' }, take.map(b => b.s));
+      return;
+    }
+    const ln = r.sb.concat([take[take.length - 1]]);
+    r.line = r.sb; r.sb = []; c.lines++;
+    H.lines.push({ t, bytes: ln });
+    done();
+    e('line', `${lead}readLine() moves ${B(take)} out of its buffer and reaches the ↵, so it returns “${text(ln)}”: exactly message ${M(ln[0].m)}${r.pend.length ? `. ${B(r.pend)} stay in the BufferedReader's buffer for the next call` : ''}.${after}`, { rrow: 'ok' }, ln.map(b => b.s));
+  }
+
+  function senderPhase(sim, P, H, e) {
+    const s = sim.snd, c = sim.c;
+    if (P.sndPaused) {
+      if (s.st !== 'paused') { s.st = 'paused'; e('pause', 'The sender thread is paused (think of a breakpoint). It makes no progress until it resumes.', { snd: 'split' }); }
+      c.sPau++; return;
+    }
+    if (s.st === 'paused') { s.st = s.sys ? 'blocked' : 'run'; s.sleep = 0; e('resume', 'The sender thread resumes.', { snd: 'ok' }); }
+    if (sleeping(s, P.sndPause)) return;
+    if (s.sys) { if (syscallStep(sim, P, H, e, false)) afterSyscall(sim, P); return; }
+    if (!s.cur && !nextMessage(sim, P, H, e)) return;
+    const cur = s.cur, left = cur.bytes.slice(cur.done);
+    if (P.mode === 'raw') {
+      const bytes = P.charLoop ? left.slice(0, 1) : left;
+      cur.done += bytes.length;
+      startSyscall(sim, P, H, e, P.charLoop ? 'char' : 'write', bytes);
+      return;
+    }
+    if (cur.done === cur.bytes.length) { startSyscall(sim, P, H, e, 'flush', s.bw.slice()); return; }   // the message is written: out.flush()
+    if (!P.charLoop) {
+      // BufferedOutputStream.write(byte[]): a long array bypasses the buffer; one that does not fit flushes it first
+      if (left.length >= P.bwSize || left.length > P.bwSize - s.bw.length) {
+        if (s.bw.length) { startSyscall(sim, P, H, e, 'full', s.bw.slice()); return; }
+        cur.done = cur.bytes.length;
+        startSyscall(sim, P, H, e, 'direct', left);
+        return;
+      }
+      s.bw = s.bw.concat(left); cur.done = cur.bytes.length; s.st = 'run';
+      e('bwrite', `out.write(m.getBytes()) copies ${B(left)} into the BufferedOutputStream's buffer (${s.bw.length} of ${P.bwSize} bytes used). No system call; out.flush() comes next.`, { brow: 'ok' }, left.map(b => b.s));
+      return;
+    }
+    const b = cur.bytes[cur.done++];
+    if (s.bw.length >= P.bwSize) { startSyscall(sim, P, H, e, 'full', s.bw.slice(), b); return; }   // write(c) on a full buffer flushes it first
+    s.bw.push(b); s.st = 'run';
+    e('bwrite', `out.write(c) puts ${B([b])} into the BufferedOutputStream's buffer (${s.bw.length} of ${P.bwSize} bytes used). No system call.${cur.done === cur.bytes.length ? ' That was the last byte: out.flush() comes next.' : ''}`, { brow: 'ok' }, [b.s]);
+  }
+
+  // the next message: a queued one first, else a random one if enabled
+  function nextMessage(sim, P, H, e) {
+    const s = sim.snd;
+    let w;
+    if (sim.queue.length) w = sim.queue.shift();
+    else if (P.auto) w = randomWord(sim, P);
+    else {
+      if (s.st !== 'idle') { s.st = 'idle'; e('idle', 'No more messages to send: the sender thread waits for work. It is not blocked on the socket.', { snd: 'info' }); }
+      sim.c.sIdle++; return false;
+    }
+    const id = ++sim.nMsg, chars = [...w, '\n'];
+    s.cur = { id, t0: sim.t, done: 0, bytes: chars.map((ch, k) => ({ s: sim.nByte++, m: id, c: ch, k, last: k === chars.length - 1 })) };
+    H.msgs.push({ id, bytes: s.cur.bytes });
+    return true;
+  }
+  function rest(s, P) { s.st = P.sndPause > 0 ? 'sleep' : 'run'; s.sleep = s.total = P.sndPause; }
+
+  // a message is done once all its bytes went down and, with a BufferedOutputStream, the buffer was flushed
+  function afterSyscall(sim, P) {
+    const s = sim.snd, cur = s.cur;
+    if (cur && cur.done === cur.bytes.length && !s.bw.length) {
+      sim.c.writes++; sim.c.wBytes += cur.bytes.length;
+      s.prev = cur; s.cur = null; rest(s, P);
+    } else s.st = 'run';
+  }
+  const SYS = {
+    write: (bs, P) => `out.write(m.getBytes()): one system call copies ${B(bs)} into the send buffer`,
+    char: (bs, P) => `out.write(c): a whole system call for the single byte ${B(bs)}`,
+    flush: (bs, P) => `out.flush(): one system call hands the buffer's ${pl(bs.length, 'byte')} ${B(bs)} to the socket`,
+    full: (bs, P) => `The BufferedOutputStream's buffer is full, so before taking another byte it writes the buffer out: one system call for ${B(bs)}`,
+    direct: (bs, P) => `m is at least as long as the buffer (${P.bwSize} bytes), so the BufferedOutputStream skips it: one system call writes ${B(bs)} straight to the socket`
+  };
+  // next: the byte an out.write(c) stores once the full buffer it had to flush is empty again
+  // a blocked write() copies whatever space TCP frees: one segment (up to MSS bytes) at a time, or the bytes an ACK covers
+  const freed = P => P.keepUnacked ? 'An ACK let the send buffer release acknowledged bytes, freeing space.'
+    : `TCP took a segment (at most MSS = ${P.mss} bytes) out of the send buffer, freeing space.`;
+  function startSyscall(sim, P, H, e, kind, bytes, next = null) {
+    sim.snd.sys = { kind, bytes, done: 0, t0: sim.t, next };
+    sim.c.wsys++;
+    if (syscallStep(sim, P, H, e, true)) afterSyscall(sim, P);
+  }
+  // copy what fits into the send buffer; returns true when the call has returned
+  function syscallStep(sim, P, H, e, starting) {
+    const s = sim.snd, c = sim.c, t = sim.t, sys = s.sys, all = sys.bytes;
+    const k = Math.min(P.sndBuf - sim.sbuf.length, all.length - sys.done);
+    const part = all.slice(sys.done, sys.done + k);
+    sim.sbuf.push(...part); c.kBytes += k;
+    s.sys = { ...sys, done: sys.done + k };
+    const fromBuf = sys.kind === 'flush' || sys.kind === 'full';
+    if (fromBuf) s.bw = s.bw.slice(k);   // flushed bytes leave the BufferedOutputStream's buffer
+    const call = sys.kind === 'flush' ? 'flush()' : 'write()';
+    if (s.sys.done === all.length) {
+      H.writes.push({ id: ++sim.nSys, t0: sys.t0, t1: t, bytes: all, kind: sys.kind });
+      s.sys = null;
+      if (fromBuf) s.bw = sys.next ? [sys.next] : [];
+      const ends = s.cur && s.cur.done === s.cur.bytes.length && !s.bw.length;
+      const after = (fromBuf ? ' The buffer is empty again.' : '') +
+        (sys.next ? ` Then out.write(c) stores ${B([sys.next])} in it.` : '') +
+        (sys.kind === 'direct' ? ' The out.flush() that follows has nothing left to do.' : '') +
+        (ends && P.sndPause ? ` The sender then works ${pl(P.sndPause, 'tick')} on its next message.` : '');
+      e(fromBuf ? (sys.kind === 'full' ? 'full' : 'flush') : 'write', starting
+        ? `${SYS[sys.kind](all, P)}. ${all.length === 1 ? 'It fits' : 'They fit'} in the send buffer, so the call returns at once.${sys.kind === 'write' ? ' Nothing has been sent yet, and m still holds its bytes: write() copies them into the kernel.' : ''}${after}`
+        : `${freed(P)} The blocked ${call} copies the last ${pl(k, 'byte')} ${B(part)} and returns, ${pl(t - sys.t0, 'tick')} after it was called.${after}`,
+        { sbuf: 'ok' }, part.map(b => b.s));
+      return true;
+    }
+    if (starting) e('wblock', `${SYS[sys.kind](all, P)}, but the send buffer has room for only ${k}${k ? `: it copies ${B(part)}` : ''}. The call blocks until TCP sends data and frees space.`, { sbuf: 'bad', snd: 'bad' }, part.map(b => b.s));
+    else if (k) e('wcopy', `${freed(P)} The blocked ${call} copies ${B(part)} into it; ${pl(all.length - s.sys.done, 'byte')} still to go, so it stays blocked.`, { sbuf: 'ok' }, part.map(b => b.s));
+    s.st = 'blocked'; c.sBlk++;
+    return false;
+  }
+
+  // Whenever the link is idle, TCP starts a segment of up to MSS bytes. Pushing it onto the wire takes size ÷ bandwidth
+  // (transmission delay); then it travels for the latency (propagation delay). A fast link can send several per tick.
+  function transmit(sim, P, e) {
+    const c = sim.c, t = sim.t, [num, den] = RATES[P.bw], tickU = num * U / den;
+    let budget = tickU, limited = false, started = 0;   // link time left in this tick, in 1/U of a byte
+    c.cap += num / den;
+    while (budget > 0) {
+      if (!sim.tx) {
+        const from = unsentStart(sim, P), unsent = sim.sbuf.length - from, allow = allowance(sim);
+        const k = Math.min(P.mss, unsent, allow);
+        // limited by flow control: the receiver's window, or (real TCP) a send buffer full of unacknowledged bytes
+        if (allow < Math.min(P.mss, unsent) || (P.keepUnacked && k < P.mss && from > 0 && sim.snd.st === 'blocked')) limited = true;
+        if (!k) break;
+        const bytes = P.keepUnacked ? sim.sbuf.slice(from, from + k) : sim.sbuf.splice(0, k);
+        sim.sndNxt += k;
+        sim.tx = { id: ++sim.nSeg, bytes, hdr: P.hdr, left: (k + P.hdr) * U, t0: t };
+        started = sim.tx.id;
+        sim.txWhy = (k === allow && allow < Math.min(P.mss, unsent) ? ` (the window allows only ${allow} more)`
+          : k === P.mss ? ` (a full segment: MSS = ${P.mss})` : k > 1 ? ' (all the waiting bytes)' : '') +
+          (P.hdr ? `, behind a ${P.hdr}-byte header${k < P.mss ? `: only ${Math.round(100 * k / (k + P.hdr))}% of this packet is data` : ''}` : '');
+      }
+      const g = sim.tx, use = Math.min(budget, g.left);
+      sim.tx = { ...g, left: g.left - use }; budget -= use;
+      c.busy += use / U; c.busyH += use / U * g.hdr / (g.bytes.length + g.hdr);
+      if (sim.tx.left) break;
+      sim.tx = null;
+      const sent = t - 1 + (tickU - budget) / tickU;   // when the last byte left
+      const arr = Math.max(Math.ceil(sent + P.lat), sim.lastArr);
+      sim.lastArr = arr; c.sent += g.bytes.length; c.hdrB += g.hdr; c.segs++;
+      sim.wire.push({ id: g.id, bytes: g.bytes, hdr: g.hdr, t0: g.t0, sent, arr });
+      const copy = P.keepUnacked ? ' A copy stays in the send buffer until it is acknowledged.' : '';
+      e('send', g.t0 === t
+        ? `TCP sends a segment with ${B(g.bytes)}${sim.txWhy}. It arrives at tick ${arr}.${copy}`
+        : `The last byte of the segment ${B(g.bytes)} is on the wire, ${pl(t - g.t0 + 1, 'tick')} after TCP started sending it. It arrives at tick ${arr}.`, { wire: 'visit' });
+    }
+    if (sim.tx && sim.tx.id === started) {
+      const g = sim.tx, need = (g.bytes.length + g.hdr) * den / num;
+      e('txstart', `TCP starts sending a segment with ${B(g.bytes)}${sim.txWhy}. At ${rateText(P.bw)}, pushing ${g.hdr ? `${g.bytes.length} + ${g.hdr} header bytes` : pl(g.bytes.length, 'byte')} onto the wire takes ${pl(+need.toFixed(2), 'tick')}.${P.keepUnacked ? ' A copy stays in the send buffer until it is acknowledged.' : ''}`, { wire: 'visit' });
+    }
+    if (limited) c.stallT++;
+    const unsent = unsentCount(sim, P), allow = allowance(sim);
+    if (unsent > 0 && allow === 0) {
+      if (!sim.stall) {
+        sim.stall = true;
+        e('stall', sim.rwnd === 0
+          ? `Zero window: the receiver's last ACK reported no free space, so TCP must not send the ${pl(unsent, 'byte')} waiting in the send buffer. This is flow control.`
+          : `Window full: the receiver's last ACK offered room for ${pl(sim.rwnd, 'byte')}, and all of them are already in flight. TCP must wait for the next ACK before sending the ${pl(unsent, 'byte')} waiting in the send buffer. This is flow control.`, { sbuf: 'bad' });
+      }
+    } else sim.stall = false;
+  }
+
+  function tick(sim, P, H, ev) {
+    const t = ++sim.t, c = sim.c;
+    let n = 0;
+    const e = (...a) => { n++; ev(...a); };
+    if (P.netPaused) {
+      // a paused link freezes everything on the wire: shift send and arrival times so nothing moves
+      if (!sim.netDown) { sim.netDown = true; e('netdown', 'The network is paused (an unplugged cable): segments and ACKs on the wire are frozen and nothing new is sent.', { wire: 'split' }); }
+      const bump = x => ({ ...x, sent: x.sent + 1, arr: x.arr + 1 });
+      sim.wire = sim.wire.map(bump); sim.acks = sim.acks.map(bump);
+      sim.lastArr++; sim.lastAckArr++;
+    } else if (sim.netDown) { sim.netDown = false; e('netup', 'The network is back: segments and ACKs move again.', { wire: 'ok' }); }
+
+    let arrived = 0;
+    while (sim.wire.length && sim.wire[0].arr <= t) {
+      const g = sim.wire.shift();
+      sim.rbuf.push(...g.bytes); sim.rcvNxt += g.bytes.length; arrived += g.bytes.length;
+      e('arrive', `A segment with ${B(g.bytes)} arrives and is appended to the receive buffer (${sim.rbuf.length} of ${P.rcvBuf} bytes used).`, { rbuf: 'visit' });
+    }
+    while (sim.acks.length && sim.acks[0].arr <= t) {
+      const a = sim.acks.shift();
+      sim.sndUna = Math.max(sim.sndUna, a.ack); sim.rwnd = a.win;
+      let freed = 0;
+      if (P.keepUnacked) while (sim.sbuf.length && sim.sbuf[0].s < sim.sndUna) { sim.sbuf.shift(); freed++; }
+      const al = allowance(sim);
+      e('ackin', `An ACK reaches the sender: the receiver has every byte before ${a.ack} and room for ${pl(a.win, 'byte')}${freed ? `, so ${pl(freed, 'acknowledged byte')} ${freed === 1 ? 'is' : 'are'} released from the send buffer` : ''}. TCP may now send ${pl(al, 'more byte')}.`, { sbuf: a.win ? 'split' : 'bad' });
+    }
+    receiverPhase(sim, P, H, e);
+    senderPhase(sim, P, H, e);
+    if (!P.netPaused) transmit(sim, P, e);
+
+    const win = P.rcvBuf - sim.rbuf.length;
+    if (arrived || win !== sim.advWin) {
+      const arr = Math.max(t + P.lat, sim.lastAckArr);
+      sim.lastAckArr = arr;
+      sim.acks.push({ id: ++sim.nAck, ack: sim.rcvNxt, win, sent: t, arr });
+      c.acks++; c.ackB += P.hdr;
+      sim.advWin = win;
+      e('ackout', arrived
+        ? `The receiver's TCP sends an ACK: every byte before ${sim.rcvNxt} has arrived, and there is room for ${pl(win, 'more byte')}${win ? '' : ' (zero window: the sender must stop)'}.`
+        : `read() freed space, so the receiver's TCP sends a window update: room for ${pl(win, 'byte')}.`, { rbuf: win ? 'split' : 'bad' });
+    }
+    if (!n) e('tick', quiet(sim, P), {});
+  }
+
+  function quiet(sim, P) {
+    const s = sim.snd, r = sim.rcv;
+    const sTxt = { run: 'ready to write', sleep: `working on its next message (tick ${s.total - s.sleep} of ${s.total})`, blocked: `still blocked in ${s.sys && s.sys.kind === 'flush' ? 'flush()' : 'write()'}`, idle: 'waiting for work', paused: 'paused' }[s.st];
+    const rTxt = { run: 'about to read', sleep: `processing (tick ${r.total - r.sleep} of ${r.total})`, blocked: 'still blocked in read()', paused: 'paused' }[r.st];
+    const fl = (sim.tx ? 'transmitting a segment, ' : '') + (sim.wire.length ? `${pl(sim.wire.length, 'segment')} in flight` : 'nothing in flight');
+    return `No thread changes state this tick. Sender: ${sTxt}. Receiver: ${rTxt}. Network: ${fl}.`;
+  }
+
+  function quiescent(sim, P) {
+    return !P.auto && !sim.queue.length && !sim.snd.cur && !sim.snd.sys && !sim.sbuf.length && !sim.tx && !sim.wire.length && !sim.acks.length &&
+      !sim.rbuf.length && !sim.rcv.pend.some(b => b.c === '\n');
+  }
+
+  // ticks the sender needs per message of L bytes: one per call on its stream
+  function sendTicks(P, L) {
+    if (P.mode === 'raw') return P.charLoop ? L : 1;
+    return P.charLoop ? L + 1 + Math.floor((L - 1) / P.bwSize) : (L >= P.bwSize ? 1 : 2);
+  }
+  // capacities in bytes per tick, assuming the other stages keep up
+  function capacities(P) {
+    const L = avgLen(P);
+    const rcv = P.mode === 'buffered' ? L / (Math.ceil(L / P.readSize) + P.rcvPause) : P.readSize / (1 + P.rcvPause);
+    return {
+      snd: P.sndPaused ? 0 : (P.auto ? L / (sendTicks(P, L) + P.sndPause) : 0),
+      net: P.netPaused ? 0 : rateVal(P.bw) * P.mss / (P.mss + P.hdr),   // payload only: headers use link time too
+      win: Math.min(P.rcvBuf, P.keepUnacked ? P.sndBuf : Infinity) / (2 * P.lat + (P.mss + P.hdr) / rateVal(P.bw)),
+      rcv: P.rcvPaused ? 0 : rcv
+    };
+  }
+  // ---------- operations ----------
+
+  const PRESETS = {
+    reader: { P: { sndPause: 0, bw: 6, lat: 2, rcvPause: 8, readSize: 12, mss: 4, hdr: 2 },
+      text: 'Slow reader: the receiver works 8 ticks on each batch of data it reads. Watch the receive buffer fill, the advertised window drop to zero, the send buffer fill and write() block: backpressure travels all the way back to the sender.' },
+    network: { P: { sndPause: 0, bw: 2, lat: 3, rcvPause: 0, readSize: 12, mss: 4, hdr: 2 },
+      text: 'Slow network: the link carries 1 byte every 2 ticks, so pushing one segment (4 data bytes plus a 2-byte header) onto the wire takes 12 ticks. The send buffer fills and write() blocks, while the receiver waits in read() and gets one segment at a time.' },
+    writer: { P: { sndPause: 5, bw: 6, lat: 2, rcvPause: 0, readSize: 12, mss: 4, hdr: 2 },
+      text: 'Slow writer: the sender works 5 ticks to produce each message. Buffers stay almost empty and the receiver spends most of its time blocked in read(), yet a message can still arrive split across segments.' },
+    lfn: { P: { sndPause: 0, bw: 8, lat: 7, rcvPause: 0, readSize: 12, mss: 4, hdr: 2 },
+      text: 'Long fat pipe: a fast link (8 B/tick) with a long latency (7 ticks each way). The receive window is smaller than what the link could carry in one round trip, so TCP mostly waits for ACKs: throughput is about window ÷ round-trip time.' }
+  };
+  const P0 = { sndBuf: 12, rcvBuf: 12, keepUnacked: false, mode: 'raw', bwSize: 8, charLoop: false, msgLen: 'medium', auto: true,
+    sndPause: 0, bw: 6, lat: 2, mss: 4, hdr: 2, rcvPause: 8, readSize: 12, sndPaused: false, netPaused: false, rcvPaused: false };
+  const SEED = 20261024, MAXSTEPS = 40000, WINDOW = 20;
+  const S = { by: 'event', speed: 800, zoom: 1 };
+
+  let P = P0, sim, TL, cur = 0, playing = false, timer = 0, rafId = 0, shown = null, undoStack = [];
+
+  // besides the recorded steps, a timeline keeps its recipe (seed, starting parameters, every change and the tick it
+  // was applied at), which is all a saved file needs: the simulation is deterministic, so replaying it rebuilds every step
+  function newTimeline(p, seed) { return { steps: [], H: { writes: [], reads: [], lines: [], msgs: [] }, cum: [], base: p, seed, ops: [] }; }
+  function recorder(kind, msg, hl = {}, hb = []) {
+    TL.steps.push({ t: sim.t, kind, msg, hl, hb, sim: cloneSim(sim), P,
+      nW: TL.H.writes.length, nR: TL.H.reads.length, nL: TL.H.lines.length, nM: TL.H.msgs.length });
+  }
+  function simTick() {
+    tick(sim, P, TL.H, recorder);
+    // the last snapshot of a tick carries the final state (silent countdowns and counters included)
+    TL.steps[TL.steps.length - 1].sim = cloneSim(sim);
+    TL.cum[sim.t] = { ...sim.c };
+  }
+  function tickEnd(i) { const t = TL.steps[i].t; while (i + 1 < TL.steps.length && TL.steps[i + 1].t === t) i++; return i; }
+  function tickStart(i) { const t = TL.steps[i].t; while (i > 0 && TL.steps[i - 1].t === t) i--; return i; }
+
+  function startRun(p, ticks, note, seed = SEED) {
+    P = p; sim = newSim(P, seed); TL = newTimeline(p, seed); TL.cum[0] = { ...sim.c };
+    recorder('info', 'A TCP connection is open between the two threads. Both socket buffers are empty.');
+    for (let i = 0; i < ticks; i++) simTick();
+    if (note) applyOp({ t: sim.t, P, msg: note });
+    cur = TL.steps.length - 1;
+  }
+  // a change applied at the end of tick op.t: new parameters, queued words, or random words drawn from the run's generator
+  function applyOp(op) {
+    P = op.P;
+    if (op.words) op.words.forEach(w => sim.queue.push(w));
+    if (op.random) for (let i = 0; i < op.random; i++) sim.queue.push(randomWord(sim, P));
+    recorder('change', op.msg);
+    TL.ops.push(op);
+  }
+  function pushUndo() { undoStack.push({ TL, cur }); if (undoStack.length > 80) undoStack.shift(); }
+
+  // apply a change from the end of the tick on screen; anything recorded after it is discarded (Undo restores it)
+  // change describes the operation from the parameters in force: { P, msg, words?, random? }
+  function fork(change) {
+    const end = tickEnd(cur), st = TL.steps[end];
+    pushUndo();
+    const lostTicks = TL.steps[TL.steps.length - 1].t - st.t;
+    TL = { steps: TL.steps.slice(0, end + 1), H: { writes: TL.H.writes.slice(0, st.nW), reads: TL.H.reads.slice(0, st.nR), lines: TL.H.lines.slice(0, st.nL), msgs: TL.H.msgs.slice(0, st.nM) },
+      cum: TL.cum.slice(0, st.t + 1), base: TL.base, seed: TL.seed, ops: TL.ops.filter(o => o.t <= st.t) };
+    sim = cloneSim(st.sim); P = st.P;
+    const op = change(P);
+    op.msg += lostTicks > 0 ? ` The ${pl(lostTicks, 'tick')} recorded after tick ${st.t} were discarded (Ctrl+Z brings them back).` : '';
+    applyOp({ t: st.t, P, ...op });
+    cur = TL.steps.length - 1;
+    showStep(cur);
+  }
+  function setParam(patch, msg) { fork(p0 => { const p = { ...p0, ...patch }; return { P: p, msg: msg(p) }; }); }
+  function restartWith(patch, msg) {
+    stopPlay();
+    pushUndo();
+    const ticks = Math.max(20, Math.min(200, TL.steps[cur].t));
+    const p = { ...TL.steps[cur].P, ...patch };
+    startRun(p, ticks, `${msg(p)} The connection was restarted and run again for ${ticks} ticks.`);
+    shown = null; showStep(cur, false);
+  }
+  function restartEmpty() {
+    stopPlay(); pushUndo();
+    startRun(TL.steps[cur].P, 0);
+    shown = null; showStep(cur, false);
+  }
+  function undo() {
+    if (!undoStack.length) return;
+    stopPlay();
+    const u = undoStack.pop();
+    TL = u.TL; cur = u.cur;
+    sim = cloneSim(TL.steps[TL.steps.length - 1].sim); P = TL.steps[TL.steps.length - 1].P;
+    showStep(cur, false);
+    setMsg('Undone.');
+  }
+
+  function queueWords(words, how) {
+    fork(p => ({ P: p, words, msg: `${how}: ${words.map(w => `write(“${w.replace(/&/g, '&amp;').replace(/</g, '&lt;')}↵”)`).join(', ')}. The sender performs them in order${p.auto ? ', before any further random messages' : ''}.` }));
+  }
+  function fromInput() {
+    const raw = $('msgInput').value.trim();
+    if (!raw) { setMsg('Type some words first.', true); return; }
+    const words = raw.split(/\s+/).map(w => w.slice(0, MAXWORD)).slice(0, 20);
+    queueWords(words, `Queued ${pl(words.length, 'write() call')}`);
+    $('msgInput').value = '';
+    setMsg(`${pl(words.length, 'message')} queued.`);
+  }
+  function randomQueue(n) {
+    // the words come from the run's own generator, so a replay draws the same ones; peek at them on a copy
+    fork(p => {
+      const peek = cloneSim(sim), ws = [];
+      for (let i = 0; i < n; i++) ws.push(randomWord(peek, p));
+      return { P: p, random: n, msg: `Queued ${pl(n, 'random message')}: ${ws.map(w => `“${w}↵”`).join(', ')}.` };
+    });
+  }
+  function applyPreset(key) {
+    const pr = PRESETS[key];
+    setParam({ ...pr.P, sndPaused: false, netPaused: false, rcvPaused: false, auto: true }, () => pr.text);
+  }
+  // ---------- save and open ----------
+  const FILE_VERSION = 1;
+  function exportRun() {
+    const last = TL.steps[TL.steps.length - 1];
+    return { app: 'sockets', version: FILE_VERSION, saved: new Date().toISOString(), note: $('saveNote').value.trim(),
+      seed: TL.seed, base: TL.base, ops: TL.ops, end: last.t, steps: TL.steps.length, cur, by: S.by,
+      at: { tick: TL.steps[cur].t, caption: TL.steps[cur].msg.replace(/<[^>]+>/g, '') } };
+  }
+  function saveRun() {
+    const data = exportRun(), name = `sockets-tick-${data.at.tick}.json`;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setFileMsg(`Saved ${name}: the whole run up to tick ${data.end}, opening at tick ${data.at.tick}.`);
+  }
+  // parameters from a file are clamped to what the controls allow, so a hand-edited file cannot break the simulation
+  function cleanP(x) {
+    const p = { ...P0 }, src = x && typeof x === 'object' ? x : {};
+    const num = (k, lo, hi) => { const v = Math.round(Number(src[k])); if (Number.isFinite(v)) p[k] = Math.max(lo, Math.min(hi, v)); };
+    num('sndBuf', 4, 24); num('rcvBuf', 4, 24); num('bwSize', 2, 16); num('sndPause', 0, 10); num('bw', 0, RATES.length - 1);
+    num('lat', 1, 8); num('mss', 1, 12); num('hdr', 0, 8); num('rcvPause', 0, 10); num('readSize', 1, 16);
+    for (const k of ['keepUnacked', 'charLoop', 'auto', 'sndPaused', 'netPaused', 'rcvPaused']) if (k in src) p[k] = !!src[k];
+    if (src.mode === 'raw' || src.mode === 'buffered') p.mode = src.mode;
+    if (src.msgLen in LENS) p.msgLen = src.msgLen;
+    return p;
+  }
+  function importRun(d) {
+    if (!d || d.app !== 'sockets' || !Array.isArray(d.ops)) throw new Error('this is not a Sockets file');
+    if (d.version > FILE_VERSION) throw new Error('it was saved by a newer version of this page');
+    const end = Math.round(Number(d.end));
+    if (!(end >= 0 && end <= 20000)) throw new Error('its length is not valid');
+    const seed = Number.isInteger(d.seed) ? d.seed : SEED;
+    const ops = d.ops.map(o => ({
+      t: Math.max(0, Math.min(end, Math.round(Number(o.t)) || 0)), P: cleanP(o.P), msg: String(o.msg ?? '').replace(/<[^>]*>/g, '').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+      ...(Array.isArray(o.words) ? { words: o.words.slice(0, 20).map(w => String(w).slice(0, MAXWORD)).filter(Boolean) } : {}),
+      ...(o.random ? { random: Math.max(1, Math.min(20, Math.round(Number(o.random)) || 1)) } : {})
+    }));
+    for (let i = 1; i < ops.length; i++) if (ops[i].t < ops[i - 1].t) throw new Error('its changes are out of order');
+    stopPlay(); pushUndo();
+    P = cleanP(d.base); sim = newSim(P, seed); TL = newTimeline(P, seed); TL.cum[0] = { ...sim.c };
+    recorder('info', 'A TCP connection is open between the two threads. Both socket buffers are empty.');
+    for (const op of ops) {
+      while (sim.t < op.t && TL.steps.length < MAXSTEPS) simTick();
+      applyOp(op);
+    }
+    while (sim.t < end && TL.steps.length < MAXSTEPS) simTick();
+    const by = d.by === 'tick' ? 'tick' : 'event';
+    S.by = by;
+    $('byTick').setAttribute('aria-pressed', String(by === 'tick'));
+    $('byEvent').setAttribute('aria-pressed', String(by === 'event'));
+    cur = Math.max(0, Math.min(TL.steps.length - 1, Math.round(Number(d.cur)) || 0));
+    $('saveNote').value = typeof d.note === 'string' ? d.note.slice(0, 2000) : '';
+    shown = null; showStep(cur, false);
+    const exact = d.steps === undefined || d.steps === TL.steps.length;
+    return { tick: TL.steps[cur].t, end, note: $('saveNote').value, exact };
+  }
+  function openFile(file) {
+    if (!file) return;
+    file.text().then(txt => {
+      const r = importRun(JSON.parse(txt));
+      setFileMsg(`Opened ${file.name} at tick ${r.tick} (recorded up to tick ${r.end}).${r.note ? ' Its note is shown above.' : ''}${r.exact ? '' : ' Warning: the replay differs from the saved run; it may come from another version of this page.'}`, !r.exact);
+    }).catch(err => setFileMsg(`Could not open ${file.name}: ${err.message}.`, true));
+  }
+  function setFileMsg(t, isErr) { const m = $('fileMsg'); m.textContent = t; m.classList.toggle('err', !!isErr); }
+  function setMsg(t, isErr) { const m = $('msg'); m.textContent = t; m.classList.toggle('err', !!isErr); }
+
+  // ---------- drawing ----------
+  const C = 34, CH = 40, X0 = 198, CODEW = 392, LH = 21, SCW = 12;
+  const f1 = v => (Math.round(v * 10) / 10).toString();
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const DEFS = '<defs>' +
+    '<marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker>' +
+    '<marker id="arrA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ackhead" d="M0 0L10 5L0 10z"/></marker>' +
+    '</defs>';
+
+  function geom(P) {
+    const CW = Math.max(840, P.sndBuf * C, P.rcvBuf * C);
+    const g = { CW, right: X0 + CW };
+    g.codeH = 38 + (P.mode === 'buffered' ? 8 : 6) * LH + 10;   // the longest program has 8 lines
+    g.bwY = 34 + 30 + CH + 34;   // BufferedOutputStream row, under the String m
+    g.sTop = 10; g.sCodeY = 34;
+    g.rowX = X0 + CODEW + 28; g.rowW = g.right - g.rowX;
+    g.sDiv = g.sCodeY + g.codeH + 16;
+    g.sbY = g.sDiv + 20;
+    g.sBot = g.sbY + CH + 42;
+    g.wY = g.sBot + 48; g.aY = g.wY + 46;
+    g.rTop = g.aY + 34;
+    g.rbY = g.rTop + 26;
+    g.rDiv = g.rbY + CH + 42;
+    g.rCodeY = g.rDiv + 16;
+    g.rBot = g.rCodeY + g.codeH + 16;
+    g.W = g.right + 30; g.H = g.rBot + 4;
+    // the cable starts with a transmit zone (one segment being pushed out), then the propagation zone
+    g.sc = Math.max(6, Math.min(26, (CW - 30) / (rateVal(P.bw) * P.lat + P.mss + P.hdr) - 2));
+    g.txW = (P.mss + P.hdr) * g.sc + 12; g.fx0 = X0 + g.txW + 18;
+    g.segH = 32;
+    return g;
+  }
+
+  // dynamic items (bytes, segments, ACKs) keyed by a stable id, so they can be tweened between snapshots
+  function scene(st) {
+    const P = st.P, s = st.sim, g = geom(P), items = new Map();
+    const hot = new Set(st.hbAll || st.hb);
+    const addByte = (id, b, x, y, w, h, ghost) => items.set(id, { type: 'b', x, y, w, h, m: b.m, ch: b.c, ghost, hot: hot.has(b.s) && !ghost });
+    // copies of the String m (drawn in the static layer) start at its chars; bytes of the BufferedOutputStream's
+    // buffer move on into the send buffer
+    const m = s.snd.cur || s.snd.prev;
+    const srcOf = b => m && b.m === m.id ? strChar(g, b.k) : null;
+    if (P.mode === 'buffered') {
+      const bw = s.snd.bw, cw = Math.min(C, g.rowW / Math.max(P.bwSize, bw.length));
+      bw.forEach((b, i) => { addByte('b' + b.s, b, g.rowX + i * cw, g.bwY, cw, CH); items.get('b' + b.s).src = srcOf(b); });
+    }
+    const unacked = P.keepUnacked ? s.sndNxt - s.sndUna : 0;
+    s.sbuf.forEach((b, j) => {
+      const ghost = j < unacked;
+      addByte((ghost ? 'u' : 'b') + b.s, b, X0 + j * C, g.sbY, C, CH, ghost);
+      if (!ghost) items.get('b' + b.s).src = srcOf(b);
+    });
+    const packet = (seg, x, tx) => {
+      const y = g.wY - g.segH / 2, hw = seg.hdr * g.sc;
+      items.set('g' + seg.id, { type: 'g', tx, x, y, w: (seg.bytes.length + seg.hdr) * g.sc + 8, h: g.segH });
+      if (seg.hdr) items.set('h' + seg.id, { type: 'h', x: x + 4, y: y + 4, w: hw, h: g.segH - 8, seq: seg.bytes[0].s, hdr: seg.hdr });
+      seg.bytes.forEach((b, i) => addByte('b' + b.s, b, x + 4 + hw + i * g.sc, y + 4, g.sc, g.segH - 8));
+    };
+    if (s.tx) packet(s.tx, X0 + 2, true);
+    for (const seg of s.wire) {
+      const p = Math.max(0, Math.min(1, (s.t - seg.sent) / Math.max(0.5, seg.arr - seg.sent)));
+      const w = (seg.bytes.length + seg.hdr) * g.sc + 8;
+      packet(seg, g.fx0 + p * (g.right - 6 - w - g.fx0), false);
+    }
+    for (const a of s.acks) {
+      const p = Math.max(0, Math.min(1, (s.t - a.sent + 0.5) / Math.max(1, a.arr - a.sent)));
+      const w = 72, x = g.right - 6 - w - p * (g.CW - 12 - w);
+      items.set('a' + a.id, { type: 'a', x, y: g.aY - 12, w, h: 24, win: a.win, ack: a.ack });
+    }
+    s.rbuf.forEach((b, j) => addByte('b' + b.s, b, X0 + j * C, g.rbY, C, CH));
+    const rowY = g.rCodeY + 30;
+    if (P.mode === 'raw') {
+      const cw = Math.min(C, g.rowW / P.readSize);
+      s.rcv.buf.forEach((b, i) => addByte('b' + b.s, b, g.rowX + i * cw, rowY, cw, CH));
+    } else {
+      const n = Math.max(P.readSize, s.rcv.pend.length), cw = Math.min(C, g.rowW / n);
+      s.rcv.pend.forEach((b, i) => addByte('b' + b.s, b, g.rowX + i * cw, rowY, cw, CH));
+      // the line being built, or the last one returned: its chars move here out of the BufferedReader's buffer
+      const chars = s.rcv.sb.length ? s.rcv.sb : s.rcv.line || [];
+      chars.forEach((b, i) => items.set('b' + b.s, { type: 'gl', ...strChar(g, i, rowY + CH + 40), m: b.m, ch: b.c }));
+    }
+    return { items, g };
+  }
+
+  // geometry of char k of the String m, drawn as a string literal: "hello↵"
+  const strChar = (g, k, y = g.sCodeY + 30) => ({ x: g.rowX + 8 + (k + 1) * SCW, y: y + 6, w: SCW, h: CH - 12 });
+  // a String drawn as a literal on its message's colour; the chars themselves are drawn by the caller
+  const strChip = (g, n, y, m) => `<rect class="cell strchip c${m % 8}" x="${g.rowX}" y="${y}" width="${(n + 2) * SCW + 16}" height="${CH}" rx="8"/>` +
+    [0, n + 1].map(k => `<text class="ct strch c${m % 8}" x="${f1(g.rowX + 8 + k * SCW + SCW / 2)}" y="${y + CH / 2}">"</text>`).join('');
+  const codeLine = (x, y, str) => {
+    const i = str.indexOf('//');
+    const body = (i < 0 ? str : str.slice(0, i)).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/\b(while|true|new|var|byte|int|String)\b/g, '<tspan class="kw">$1</tspan>');
+    return `<text class="code" x="${x}" y="${y}">${body}${i < 0 ? '' : `<tspan class="cm">${str.slice(i).replace(/</g, '&lt;')}</tspan>`}</text>`;
+  };
+  function threadBox(key, x, y, g, stCls, badge, lines, curLine, hint) {
+    let out = `<g class="clickable st-${stCls}" data-act="${key}">`;
+    out += `<rect class="hit" x="${x}" y="${y}" width="${CODEW}" height="${g.codeH}" rx="8"/>`;
+    out += `<rect class="codebox" x="${x}" y="${y}" width="${CODEW}" height="${g.codeH}" rx="8"/>`;
+    const bw = badge.length * 7.6 + 20;
+    out += `<g class="badge"><rect x="${x + 12}" y="${y + 9}" width="${f1(bw)}" height="22" rx="11"/><text x="${x + 22}" y="${y + 20}">${badge}</text></g>`;
+    out += `<text class="hintclick" x="${x + CODEW - 12}" y="${y + 24}">${hint}</text>`;
+    lines.forEach((ln, i) => {
+      const ly = y + 38 + i * LH;
+      if (i === curLine) out += `<rect class="curline" x="${x + 6}" y="${ly}" width="${CODEW - 12}" height="${LH}" rx="4"/><text class="curmark" x="${x + 12}" y="${ly + 15}">▶</text>`;
+      if (ln) out += `<text class="ln" x="${x + 40}" y="${ly + 15}">${i + 1}</text>`;
+      out += codeLine(x + 48, ly + 15, ln);
+    });
+    return out + '</g>';
+  }
+
+  function staticLayer(st, g) {
+    const P = st.P, s = st.sim, hl = st.hlAll || st.hl;
+    let o = '';
+    // host frames with legends
+    const frame = (y0, y1, title) => `<rect class="host" x="2" y="${y0}" width="${g.W - 4}" height="${y1 - y0}" rx="12"/>` +
+      `<rect class="hostplate" x="16" y="${y0 - 9}" width="${title.length * 9 + 16}" height="18"/><text class="hosttitle" x="24" y="${y0 + 4}">${title}</text>`;
+    o += frame(g.sTop, g.sBot, 'SENDER PROCESS');
+    o += frame(g.rTop, g.rBot, 'RECEIVER PROCESS');
+    const lab = (y, a, b, mono) => `<text class="rowlab" x="20" y="${y}">${a}</text><text class="rowsub${mono ? ' mono' : ''}" x="20" y="${y + 19}">${b}</text>`;
+
+    // ---- sender thread
+    const sst = s.snd.st === 'sleep' && s.snd.sleep >= s.snd.total ? 'run' : s.snd.st;
+    const buffered = P.mode === 'buffered', sys = s.snd.sys, loop = P.charLoop;
+    const sBadge = { run: 'RUNNING', sleep: `WORKING · TICK ${s.snd.total - s.snd.sleep} OF ${s.snd.total}`, blocked: `BLOCKED IN ${sys && sys.kind === 'flush' ? 'flush()' : 'write()'}`, idle: 'WAITING FOR WORK', paused: 'PAUSED' }[sst];
+    const sCls = { run: 'run', sleep: 'sleep', blocked: 'blocked', idle: 'idle', paused: 'paused' }[sst];
+    const head = buffered ? ['var out = new BufferedOutputStream(', `    socket.getOutputStream(), ${P.bwSize});`] : ['var out = socket.getOutputStream();'];
+    const body = loop ? ['  for (char c : m.toCharArray())', `    out.write(c);  // ${buffered ? 'into the buffer' : 'a system call each'}`] : ['  out.write(m.getBytes());'];
+    const sLines = [...head, 'while (true) {', `  String m = nextMessage(); // ${P.sndPause} ticks`, ...body, ...(buffered ? ['  out.flush();'] : []), '}'];
+    const L = { next: head.length + 1, write: head.length + 1 + body.length, flush: head.length + 2 + body.length };
+    const sCur = sst === 'sleep' || sst === 'idle' ? L.next : sys ? (sys.kind === 'flush' ? L.flush : L.write) : s.snd.cur ? L.write : L.next;
+    o += lab(g.sCodeY + 20, 'Sender thread', 'user space');
+    o += threadBox('snd', X0, g.sCodeY, g, sCls, sBadge, sLines, sCur, P.sndPaused ? 'click to resume' : 'click to pause');
+    // the String m: always whole, since write() copies its bytes and never removes them
+    const cur = s.snd.cur, m = cur || s.snd.prev;
+    if (m) {
+      const n = m.bytes.length, y = g.sCodeY + 30, cls = `c${m.id % 8}`;
+      o += `<text class="note" x="${g.rowX}" y="${g.sCodeY + 20}">String m = nextMessage()${!cur ? ': already written'
+        : loop && (cur.done < n || (sys && sys.kind === 'char')) ? `: the loop is at c = <tspan class="k">'${esc(cur.bytes[sys && sys.kind === 'char' ? cur.done - 1 : cur.done].c)}'</tspan>`
+        : loop ? ': the loop has finished' : ''}</text>`;
+      o += strChip(g, n, y, m.id) + m.bytes.map((b, i) => `<text class="ct strch ${cls}" x="${f1(g.rowX + 8 + (i + 1) * SCW + SCW / 2)}" y="${y + CH / 2}">${esc(b.c)}</text>`).join('');
+      if (cur && loop && cur.done < n + (sys && sys.kind === 'char' ? 1 : 0)) {
+        const i = sys && sys.kind === 'char' ? cur.done - 1 : cur.done, x = g.rowX + 8 + (i + 1) * SCW + SCW / 2;
+        o += `<path class="caret" d="M${f1(x - 6)} ${y + CH + 9} L${f1(x)} ${y + CH + 2} L${f1(x + 6)} ${y + CH + 9}z"/>`;
+      }
+    } else {
+      o += `<text class="note" x="${g.rowX}" y="${g.sCodeY + 20}">${sst === 'idle' ? 'No message to write: nothing queued and random messages are off.' : 'No message yet.'}</text>`;
+    }
+    if (buffered) {
+      const bw = s.snd.bw, n = Math.max(P.bwSize, bw.length), cw = Math.min(C, g.rowW / n);
+      o += `<text class="note" x="${g.rowX}" y="${g.bwY - 10}">${sys && (sys.kind === 'flush' || sys.kind === 'full')
+        ? `${sys.kind === 'flush' ? 'out.flush()' : 'Buffer full'}: a write() system call is moving these into the kernel`
+        : `BufferedOutputStream's buffer: <tspan class="k">${bw.length}</tspan> of <tspan class="k">${P.bwSize}</tspan> bytes, in user space`}</text>`;
+      o += slotsRow(g.rowX, g.bwY, n, cw, hl.brow);
+    }
+    const q = s.queue.length, qY = buffered ? g.bwY + CH + 24 : g.sCodeY + 30 + CH + 30;
+    if (q) o += `<text class="note" x="${g.rowX}" y="${qY}">Queued next: ${s.queue.slice(0, 5).map(w => `“${w.replace(/&/g, '&amp;').replace(/</g, '&lt;')}↵”`).join(' ')}${q > 5 ? ` … (+${q - 5})` : ''}</text>`;
+    else if (P.auto) o += `<text class="note" x="${g.rowX}" y="${qY}">Next messages: random ${P.msgLen} words.</text>`;
+    o += `<line class="divider" x1="${X0}" y1="${g.sDiv}" x2="${g.right}" y2="${g.sDiv}"/><text class="divlab" x="${g.right}" y="${g.sDiv - 6}">USER SPACE ↑   KERNEL ↓   ${buffered ? 'only a flush, or a full buffer, calls write(), which copies bytes down' : 'every out.write() is a system call that copies bytes down'}</text>`;
+
+    // ---- send buffer
+    o += lab(g.sbY + 12, 'Send buffer', 'in the kernel') + `<text class="rowsub mono" x="20" y="${g.sbY + 48}">SO_SNDBUF = ${P.sndBuf}</text>`;
+    o += bufferRow(X0, g.sbY, P.sndBuf, hl.sbuf);
+    const from = unsentStart(s, P), unsent = s.sbuf.length - from, inflight = s.sndNxt - s.sndUna, allow = allowance(s);
+    const free = P.sndBuf - s.sbuf.length;
+    o += `<text class="note" x="${X0}" y="${g.sbY + CH + 24}">` +
+      `<tspan class="k">${s.sbuf.length}</tspan> of ${P.sndBuf} used${P.keepUnacked ? ` (<tspan class="k">${from}</tspan> awaiting ACK, <tspan class="k">${unsent}</tspan> unsent)` : ''}, <tspan class="${free ? 'k' : 'bad'}">${free}</tspan> free` +
+      `   ·   window <tspan class="${s.rwnd ? 'k' : 'bad'}">${s.rwnd}</tspan> (last ACK) − in flight <tspan class="k">${inflight}</tspan> = may send <tspan class="${allow ? 'ok' : 'bad'}">${allow}</tspan>` +
+      `${unsent > 0 && allow === 0 ? `   <tspan class="bad">${s.rwnd ? 'window full: waiting for an ACK' : 'zero window: waiting for the receiver'}</tspan>` : ''}</text>`;
+
+    // ---- network
+    const netCls = P.netPaused ? ' down' : '';
+    o += `<text class="rowlab" x="20" y="${g.wY - 14}">Network</text><text class="rowsub" x="20" y="${g.wY + 5}">${rateText(P.bw)}</text><text class="rowsub" x="20" y="${g.wY + 23}">latency ${pl(P.lat, 'tick')}</text><text class="rowsub" x="20" y="${g.wY + 41}">MSS ${P.mss} + header ${P.hdr}</text>`;
+    o += `<g class="clickable" data-act="net"><rect class="hit" x="${X0 - 4}" y="${g.wY - 26}" width="${g.CW + 8}" height="${g.aY - g.wY + 42}"/>`;
+    o += `<line class="cable${netCls}${hl.wire === 'visit' ? '' : ''}" x1="${X0}" y1="${g.wY}" x2="${g.right}" y2="${g.wY}"/>`;
+    o += `<path class="acklane" marker-end="url(#arrA)" d="M${g.right} ${g.aY} L${X0 + 2} ${g.aY}"/>`;
+    o += `<text class="hintclick" x="${g.right}" y="${g.aY + 28}">ACKs flow back · click the cable to ${P.netPaused ? 'resume' : 'pause'} the network</text>`;
+    o += `<line class="zonesep" x1="${g.fx0 - 9}" y1="${g.wY - 20}" x2="${g.fx0 - 9}" y2="${g.wY + 20}"/>`;
+    o += `<text class="zonelab" x="${X0}" y="${g.wY - 24}">transmit</text><text class="zonelab" x="${g.fx0}" y="${g.wY - 24}">propagate (${pl(P.lat, 'tick')})</text>`;
+    if (s.tx) {
+      const done = 1 - s.tx.left / ((s.tx.bytes.length + s.tx.hdr) * U);
+      o += `<rect class="txbar" x="${X0 + 2}" y="${g.wY + g.segH / 2 + 4}" width="${f1(g.txW - 10)}" height="5" rx="2.5"/>` +
+        `<rect class="txbar done" x="${X0 + 2}" y="${g.wY + g.segH / 2 + 4}" width="${f1((g.txW - 10) * done)}" height="5" rx="2.5"/>`;
+    }
+    if (P.netPaused) o += `<text class="netpaused" x="${X0 + g.CW / 2}" y="${g.wY - 22}">NETWORK PAUSED</text>`;
+    o += '</g>';
+    // connectors: oldest bytes leave the send buffer at its left end; arrivals enter the receive buffer at its right end
+    o += `<path class="conn" marker-end="url(#arr)" d="M${X0 - 4} ${g.sbY + CH / 2} H${X0 - 14} V${g.wY} H${X0 - 2}"/>`;
+    const rEnd = X0 + P.rcvBuf * C;
+    o += `<path class="conn" marker-end="url(#arr)" d="M${g.right} ${g.wY} H${g.right + 14} V${g.rbY + CH / 2} H${rEnd + 6}"/>`;
+
+    // ---- receive buffer
+    o += lab(g.rbY + 12, 'Receive buffer', 'in the kernel') + `<text class="rowsub mono" x="20" y="${g.rbY + 48}">SO_RCVBUF = ${P.rcvBuf}</text>`;
+    o += bufferRow(X0, g.rbY, P.rcvBuf, hl.rbuf);
+    const rfree = P.rcvBuf - s.rbuf.length;
+    o += `<text class="note" x="${X0}" y="${g.rbY + CH + 24}"><tspan class="k">${s.rbuf.length}</tspan> of ${P.rcvBuf} used, <tspan class="${rfree ? 'k' : 'bad'}">${rfree}</tspan> free → the window advertised in the next ACK${rfree ? '' : '   <tspan class="bad">full: zero window</tspan>'}</text>`;
+    o += `<line class="divider" x1="${X0}" y1="${g.rDiv}" x2="${g.right}" y2="${g.rDiv}"/><text class="divlab" x="${g.right}" y="${g.rDiv - 6}">KERNEL ↑   USER SPACE ↓   read() copies bytes up to the application</text>`;
+
+    // ---- receiver thread
+    const r = s.rcv, rst = r.st === 'sleep' && r.sleep >= r.total ? 'run' : r.st, line = P.mode === 'buffered';
+    const rBadge = { run: 'RUNNING', sleep: `PROCESSING · TICK ${r.total - r.sleep} OF ${r.total}`, blocked: 'BLOCKED IN read()', paused: 'PAUSED' }[rst];
+    const rLines = line
+      ? ['var r = new BufferedReader(', `    new InputStreamReader(in), ${P.readSize});`, 'while (true) {', '  String s = r.readLine();', `  process(s);  // ${P.rcvPause} ticks`, '}']
+      : ['var in = socket.getInputStream();', `byte[] buf = new byte[${P.readSize}];`, 'while (true) {', '  int n = in.read(buf);', `  process(buf, n);  // ${P.rcvPause} ticks`, '}'];
+    const rCur = rst === 'sleep' ? 4 : 3;
+    o += lab(g.rCodeY + 20, 'Receiver thread', 'user space');
+    o += threadBox('rcv', X0, g.rCodeY, g, rst, rBadge, rLines, rCur, P.rcvPaused ? 'click to resume' : 'click to pause');
+    const rowY = g.rCodeY + 30;
+    if (!line) {
+      const cw = Math.min(C, g.rowW / P.readSize), n = r.buf.length;
+      o += `<text class="note" x="${g.rowX}" y="${g.rCodeY + 20}">buf, byte[${P.readSize}]${n ? `: the last read() returned n = <tspan class="k">${n}</tspan>` : ': nothing read yet'}</text>`;
+      o += slotsRow(g.rowX, rowY, P.readSize, cw, hl.rrow);
+      for (let i = 1; i < n; i++) if (r.buf[i].m !== r.buf[i - 1].m)
+        o += `<line class="boundary" x1="${f1(g.rowX + i * cw)}" y1="${rowY - 7}" x2="${f1(g.rowX + i * cw)}" y2="${rowY + CH + 7}"/>`;
+      if (n) {
+        const cls = classify(r.buf);
+        o += `<text class="note" x="${g.rowX}" y="${rowY + CH + 26}">${cls === 'mixed' ? '<tspan class="bad">bytes from more than one write()</tspan>' : cls === 'partial' ? 'only part of one message' : '<tspan class="ok">exactly one whole message</tspan>'}</text>`;
+      }
+    } else {
+      const n = Math.max(P.readSize, r.pend.length), cw = Math.min(C, g.rowW / n);
+      o += `<text class="note" x="${g.rowX}" y="${g.rCodeY + 20}">BufferedReader's buffer: <tspan class="k">${r.pend.length}</tspan> of <tspan class="k">${P.readSize}</tspan> bytes read() and not yet consumed</text>`;
+      o += slotsRow(g.rowX, rowY, n, cw, hl.rrow);
+      for (let i = 1; i < r.pend.length; i++) if (r.pend[i].m !== r.pend[i - 1].m)
+        o += `<line class="boundary" x1="${f1(g.rowX + i * cw)}" y1="${rowY - 7}" x2="${f1(g.rowX + i * cw)}" y2="${rowY + CH + 7}"/>`;
+      const sy = rowY + CH + 40, chars = r.sb.length ? r.sb : r.line;
+      o += `<text class="note" x="${g.rowX}" y="${sy - 10}">${r.sb.length ? 'readLine() is building a line: no ↵ yet' : r.line ? 'String s = r.readLine() returned, always exactly one message' : 'readLine() has not returned yet'}</text>`;
+      if (chars && chars.length) o += strChip(g, chars.length, sy, chars[0].m);
+    }
+    return o;
+  }
+  function bufferRow(x, y, n, state) {
+    let o = '';
+    for (let j = 0; j < n; j++) o += `<rect class="slot" x="${x + j * C + 2}" y="${y + 2}" width="${C - 4}" height="${CH - 4}" rx="4"/>`;
+    for (let j = 0; j < n; j += (n > 12 ? 4 : 2)) o += `<text class="idx" x="${x + j * C + C / 2}" y="${y - 5}">${j}</text>`;
+    return o + `<rect class="bufframe${state ? ' s-' + state : ''}" x="${x - 3}" y="${y - 3}" width="${n * C + 6}" height="${CH + 6}" rx="7"/>`;
+  }
+  function slotsRow(x, y, n, cw, state) {
+    let o = '';
+    for (let j = 0; j < n; j++) o += `<rect class="slot" x="${f1(x + j * cw + 2)}" y="${y + 2}" width="${f1(cw - 4)}" height="${CH - 4}" rx="4"/>`;
+    return o + `<rect class="bufframe thin${state ? ' s-' + state : ''}" x="${x - 3}" y="${y - 3}" width="${f1(n * cw + 6)}" height="${CH + 6}" rx="7"/>`;
+  }
+
+  function itemSvg(it) {
+    const op = it.op.toFixed(3);
+    if (it.type === 'gl') return `<text class="ct strch c${it.m % 8}" opacity="${op}" x="${f1(it.x + it.w / 2)}" y="${f1(it.y + it.h / 2)}">${esc(it.ch)}</text>`;
+    if (it.type === 'h') return `<g opacity="${op}"><title>Header (${pl(it.hdr, 'byte')}): sequence number ${it.seq}, ports, ACK, window, checksum…</title>` +
+      `<rect class="hdrcell" x="${f1(it.x + 1)}" y="${f1(it.y + 1)}" width="${f1(it.w - 2)}" height="${f1(it.h - 2)}" rx="3"/>` +
+      (it.w >= 22 ? `<text class="hdrtxt" x="${f1(it.x + it.w / 2)}" y="${f1(it.y + it.h / 2)}" style="font-size:${f1(Math.min(12, it.w / 3.2))}px">${it.w >= 40 ? 'seq ' : ''}${it.seq}</text>` : '') + '</g>';
+    if (it.type === 'g') return `<rect class="segframe${it.tx ? ' tx' : ''}" opacity="${op}" x="${f1(it.x)}" y="${f1(it.y)}" width="${f1(it.w)}" height="${f1(it.h)}" rx="6"/>`;
+    if (it.type === 'a') {
+      const z = it.win === 0 ? ' zero' : '';
+      return `<g opacity="${op}"><title>ACK ${it.ack}, window ${it.win}: a header with no data</title><rect class="ackchip${z}" x="${f1(it.x)}" y="${f1(it.y)}" width="${f1(it.w)}" height="${f1(it.h)}" rx="12"/>` +
+        `<text class="acktxt${z}" x="${f1(it.x + it.w / 2)}" y="${f1(it.y + it.h / 2)}">win ${it.win}</text></g>`;
+    }
+    const pad = it.w >= 12 ? 2 : 0.5, fs = Math.min(18, it.h * 0.5, it.w * 0.66);
+    let o = `<g class="byte${it.ghost ? ' ghost' : ''}${it.hot ? ' hot' : ''}" opacity="${op}">` +
+      `<rect class="cell c${it.m % 8}" x="${f1(it.x + pad)}" y="${f1(it.y + pad)}" width="${f1(Math.max(1, it.w - 2 * pad))}" height="${f1(it.h - 2 * pad)}" rx="${it.w >= 12 ? 4 : 1}"/>`;
+    if (it.w >= 12) o += `<text class="ct c${it.m % 8}" x="${f1(it.x + it.w / 2)}" y="${f1(it.y + it.h / 2)}" style="font-size:${f1(fs)}px">${esc(it.ch)}</text>`;
+    return o + '</g>';
+  }
+
+  let lastStat = '';
+  function render(target, from, t, st) {
+    const g = target.g;
+    const list = [];
+    for (const [id, p] of target.items) {
+      const o = from && from.items.get(id);
+      const so = !o && from && p.src;
+      const a = o || so;
+      list.push(a ? { ...p, x: lerp(a.x, p.x, t), y: lerp(a.y, p.y, t), w: lerp(a.w, p.w, t), h: lerp(a.h, p.h, t), op: 1 } : { ...p, op: from ? t : 1 });
+    }
+    if (from) for (const [id, o] of from.items) if (!target.items.has(id)) list.push({ ...o, op: 1 - t });
+    const order = { g: 0, a: 1, h: 2, b: 2, gl: 3 };
+    list.sort((a, b) => order[a.type] - order[b.type]);
+    const svg = $('svg');
+    svg.setAttribute('viewBox', `0 0 ${g.W} ${g.H}`);
+    const avail = Math.max(240, $('stage').clientWidth - 26);
+    const scale = Math.min(Math.max(avail / g.W, 0.45), 1.5) * S.zoom;
+    svg.style.width = f1(g.W * scale) + 'px';
+    svg.style.height = f1(g.H * scale) + 'px';
+    if (!svg.firstChild) svg.innerHTML = DEFS + '<g id="gStat"></g><g id="gDyn"></g>';
+    if (lastStat !== target.stat) { $('gStat').innerHTML = target.stat; lastStat = target.stat; }
+    $('gDyn').innerHTML = list.map(itemSvg).join('');
+  }
+
+  // ---------- step playback ----------
+  const TAGS = {
+    write: ['write() returns', 'ok'], bwrite: ['Into buffer', 'ok'], scan: ['readLine()', 'found'], full: ['Buffer full', 'found'], flush: ['flush()', 'ok'], wblock: ['write() blocks', 'bad'], wcopy: ['write() copies', 'ok'], idle: ['Idle', 'info'],
+    send: ['Transmit', 'visit'], txstart: ['Transmit starts', 'visit'], stall: ['Flow control', 'bad'], arrive: ['Arrive', 'visit'],
+    ackout: ['ACK sent', 'split'], ackin: ['ACK received', 'split'],
+    read_whole: ['read(): 1 msg', 'ok'], read_partial: ['read(): partial', 'found'], read_mixed: ['read(): mixed', 'bad'],
+    rblock: ['read() blocks', 'bad'], line: ['readLine()', 'ok'],
+    pause: ['Paused', 'split'], resume: ['Resumed', 'ok'], netdown: ['Link paused', 'split'], netup: ['Link resumed', 'ok'],
+    tick: ['Quiet tick', 'info'], info: ['Info', 'info'], change: ['Change', 'info']
+  };
+  const tagHtml = kind => `<span class="tag t-${TAGS[kind][1]}">${TAGS[kind][0]}</span>`;
+
+  function decorate(i) {
+    // in tick mode the picture and caption cover every event of the tick
+    const st = TL.steps[i];
+    if (S.by === 'event') return { ...st, hbAll: null, hlAll: null, evs: [st] };
+    const a = tickStart(i), evs = TL.steps.slice(a, i + 1);
+    const hbAll = [], hlAll = {};
+    evs.forEach(e => { hbAll.push(...e.hb); Object.assign(hlAll, e.hl); });
+    return { ...st, hbAll, hlAll, evs };
+  }
+
+  function showStep(i, animate = true) {
+    i = Math.max(0, Math.min(TL.steps.length - 1, i));
+    cur = i;
+    const st = decorate(i);
+    const sc = scene(st);
+    sc.stat = staticLayer(st, sc.g);
+    const from = shown;
+    cancelAnimationFrame(rafId);
+    updateChrome(st);
+    const dur = (!animate || !from || reduceMotion.matches) ? 0 : Math.min(450, S.speed * 0.6);
+    shown = sc;
+    if (!dur) { render(sc, null, 1, st); return; }
+    const t0 = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now - t0) / dur);
+      const e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      render(sc, from, e, st);
+      if (t < 1) rafId = requestAnimationFrame(step);
+    };
+    render(sc, from, 0, st);
+    rafId = requestAnimationFrame(step);
+  }
+  function redraw() { if (TL.steps.length) { shown = null; showStep(cur, false); } }
+
+  function nextIdx() {
+    if (S.by === 'event') { if (cur + 1 >= TL.steps.length) simTick(); return cur + 1; }
+    const e = tickEnd(cur);
+    if (e > cur) return e;
+    if (cur + 1 >= TL.steps.length) simTick();
+    return tickEnd(cur + 1);
+  }
+  function prevIdx() { return S.by === 'event' ? Math.max(0, cur - 1) : Math.max(0, tickStart(cur) - 1); }
+  function canAdvance() {
+    if (TL.steps.length >= MAXSTEPS && cur >= TL.steps.length - 1) return false;
+    return cur < TL.steps.length - 1 || !quiescent(TL.steps[cur].sim, TL.steps[cur].P);
+  }
+  function advance() {
+    if (!canAdvance()) {
+      stopPlay();
+      setMsg(TL.steps.length >= MAXSTEPS ? 'Recording limit reached: restart to continue.'
+        : 'Everything written has been read. Queue messages or turn random messages on.', TL.steps.length >= MAXSTEPS);
+      return false;
+    }
+    showStep(nextIdx());
+    return true;
+  }
+  function schedule() {
+    clearTimeout(timer);
+    if (!playing) return;
+    timer = setTimeout(() => { if (advance()) schedule(); }, S.speed);
+  }
+  function stopPlay() { playing = false; clearTimeout(timer); updatePlayBtn(); }
+  function togglePlay() {
+    if (playing) { stopPlay(); return; }
+    if (!canAdvance()) { advance(); return; }
+    playing = true; updatePlayBtn(); advance(); schedule();
+  }
+  function go(i) { stopPlay(); showStep(i); }
+  function fastForward(n) {
+    stopPlay();
+    if (cur < TL.steps.length - 1) { showStep(TL.steps.length - 1); return; }
+    for (let k = 0; k < n && !quiescent(sim, P) && TL.steps.length < MAXSTEPS; k++) simTick();
+    showStep(TL.steps.length - 1);
+  }
+
+  function updatePlayBtn() {
+    const b = $('playBtn');
+    b.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    b.innerHTML = playing
+      ? '<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></svg>';
+  }
+
+  function updateChrome(st) {
+    const live = cur >= TL.steps.length - 1, last = TL.steps[TL.steps.length - 1].t;
+    const evIdx = cur - tickStart(cur) + 1, evN = tickEnd(cur) - tickStart(cur) + 1;
+    $('counter').innerHTML = `Tick ${st.t}${S.by === 'event' ? ` · event ${evIdx}/${evN}` : ''} · ` +
+      (live ? '<span class="live">● live</span>' : `<span class="replay">replay</span> (recorded to tick ${last})`);
+    if (st.evs.length > 1) {
+      $('caption').innerHTML = `<span class="tickno">TICK ${st.t}</span><ul>${st.evs.map(e => `<li>${tagHtml(e.kind)}${e.msg}</li>`).join('')}</ul>`;
+    } else {
+      $('caption').innerHTML = `<span class="tickno">TICK ${st.t}</span>${tagHtml(st.kind)}${st.msg}`;
+    }
+    $('firstBtn').disabled = $('prevBtn').disabled = cur === 0;
+    $('lastBtn').disabled = live;
+    $('nextBtn').disabled = !canAdvance();
+    $('undoBtn').disabled = !undoStack.length;
+    updatePlayBtn();
+    syncControls(st.P);
+    updateStats(st);
+    updateBneck(st);
+    updateLists(st);
+    updateLog(st);
+    updateRules(st.P);
+  }
+
+  function updateStats(st) {
+    const c = st.sim.c, s = st.sim;
+    $('stTick').textContent = st.t;
+    $('stW').textContent = c.kBytes;
+    $('stFly').textContent = onWire(s);
+    $('stR').textContent = c.rBytes;
+    $('stReads').textContent = c.reads;
+    $('stWrites').textContent = c.wsys;
+    $('stWhole').textContent = c.whole;
+    $('stPart').textContent = c.partial;
+    $('stMix').textContent = c.mixed;
+  }
+
+  function updateBneck(st) {
+    const P = st.P, c = st.sim.c, T = st.t;
+    const W = Math.min(WINDOW, T), then = TL.cum[T - W] || TL.cum[0], d = k => c[k] - then[k];
+    const pct = (a, b) => b > 0 ? Math.round(100 * Math.min(1, a / b)) : 0;
+    const cap = capacities(P);
+    const fmt = v => v === Infinity ? '∞' : v.toFixed(v < 10 ? 1 : 0);
+    const rows = [
+      ['snd', 'Sender thread', P.auto ? `writes ≈ ${fmt(cap.snd)} B/tick` : 'only queued messages', P.mode === 'buffered' ? 'blocked writing to the socket' : 'blocked in write()', pct(d('sBlk'), W), 'bad'],
+      ['net', 'Network link', `${fmt(cap.net)} B/tick${P.hdr ? ' of data' : ''}`, 'busy', pct(d('busy'), d('cap')), 'visit'],
+      ['win', 'Flow-control window', `≈ ${fmt(cap.win)} B/tick`, 'limits sending', pct(d('stallT'), W), 'bad'],
+      ['rcv', 'Receiver thread', `reads ≈ ${fmt(cap.rcv)} B/tick`, 'blocked in read()', pct(d('rBlk'), W), 'bad']
+    ];
+    const capVals = { snd: P.auto ? cap.snd : Infinity, net: cap.net, win: cap.win, rcv: cap.rcv };
+    const min = Math.min(...Object.values(capVals));
+    const hot = Object.keys(capVals).filter(k => capVals[k] === min);
+    let h = '<span class="hd">Stage</span><span class="hd" style="text-align:right">Can handle</span><span class="hd">Last ' + pl(W, 'tick') + '</span><span class="hd"></span>';
+    for (const [k, name, capTxt, what, p, cls] of rows) {
+      const paused = P[{ snd: 'sndPaused', net: 'netPaused', rcv: 'rcvPaused' }[k]];
+      h += `<span class="name${hot.includes(k) && P.auto ? ' hot' : ''}">${name}${hot.includes(k) && P.auto ? ' ◀ bottleneck' : ''}</span>` +
+        `<span class="cap">${paused ? 'paused' : capTxt}</span>` +
+        (k === 'net' && P.hdr
+          ? `<span class="bar ${cls}"><span style="width:${pct(d('busy') - d('busyH'), d('cap'))}%"></span><span class="hdr" style="left:${pct(d('busy') - d('busyH'), d('cap'))}%;width:${pct(d('busyH'), d('cap'))}%"></span></span>` +
+            `<span class="meas">${p}% busy: ${pct(d('busy') - d('busyH'), d('cap'))}% data, ${pct(d('busyH'), d('cap'))}% headers</span>`
+          : `<span class="bar ${cls}"><span style="width:${p}%"></span></span><span class="meas">${p}% ${what}</span>`);
+    }
+    $('bneck').innerHTML = h;
+    const thr = W ? d('rBytes') / W : 0;
+    const why = !P.auto ? 'With random messages off, the sender only writes what you queue.'
+      : hot[0] === 'snd' ? (P.charLoop ? `The sender is the slowest stage: it calls out.write() once per byte, one call per tick.${P.mode === 'raw' ? ' Without a buffer each call is a system call, and TCP often sends each byte in its own segment, behind a whole header.' : ' The buffer still turns them into one system call per message.'}`
+        : 'The sender is the slowest stage, so everyone else waits for it: the receiver blocks in read().')
+      : hot[0] === 'net' ? 'The link is the slowest stage: the send buffer fills up and write() blocks, while the receiver waits for data.'
+      : hot[0] === 'win' ? `At most ${pl(Math.min(P.rcvBuf, P.keepUnacked ? P.sndBuf : Infinity), 'byte')} can be unacknowledged (${P.keepUnacked && P.sndBuf < P.rcvBuf ? 'the send buffer' : 'the receive buffer'}), less than the link carries in one round trip of ${pl(2 * P.lat, 'tick')}, so TCP spends its time waiting for ACKs.`
+      : 'The receiver is the slowest stage: the receive buffer fills, the window closes, and the backpressure blocks the sender in write().';
+    $('bneckFoot').innerHTML = `Measured throughput to the receiving application: <b>${thr.toFixed(2)} B/tick</b> over the last ${pl(W, 'tick')}. ${why}`;
+    const tot = c.sent + c.hdrB;
+    $('wireEff').innerHTML = !c.segs ? 'No segment has been sent yet.'
+      : `Since tick 0, ${pl(c.segs, 'segment')} carried <b>${c.sent} B</b> of data and <b>${c.hdrB} B</b> of headers: ` +
+        `<b>${Math.round(100 * c.sent / tot)}%</b> of what went over the link was payload, ${(c.sent / c.segs).toFixed(1)} data bytes per segment on average` +
+        `${P.hdr ? ` (at most ${Math.round(100 * P.mss / (P.mss + P.hdr))}% with full ${P.mss}-byte segments)` : ''}. ` +
+        `In the other direction, ${pl(c.acks, 'ACK')} added ${c.ackB} B of headers and no data. Real TCP/IP headers take 40 bytes, against an MSS of typically 1460.`;
+  }
+
+  function updateLists(st) {
+    const H = TL.H, s = st.sim, P = st.P;
+    let w = '';
+    const sys = s.snd.sys;
+    $('wlistHead').textContent = 'Sender: each write() system call';
+    $('wlistSub').textContent = P.mode === 'buffered'
+      ? 'Writing into the BufferedOutputStream is not a system call. The socket sees one write() per flush(), or when the buffer fills up.'
+      : P.charLoop ? 'Every out.write(c) is a system call that copies a single byte.' : 'One write() per message, as the application handed it to the socket.';
+    const KIND = { char: ['write(c)', 'found'], flush: ['flush()', 'ok'], full: ['buffer full', 'found'], direct: ['bypasses buffer', 'visit'] };
+    const tagOf = k => KIND[k] ? ` <span class="tag t-${KIND[k][1]}">${KIND[k][0]}</span>` : '';
+    if (sys) w += `<li><span class="n">#${s.nSys + 1}</span><span class="bytes">${sys.bytes.map((b, i) => `<span class="b c${b.m % 8}${i < sys.done ? '' : ' pend'}">${esc(b.c)}</span>`).join('')}</span><span class="meta">t ${sys.t0}– <span class="tag t-bad">${sys.done} of ${sys.bytes.length} copied</span>${tagOf(sys.kind)}</span></li>`;
+    for (let i = st.nW - 1; i >= Math.max(0, st.nW - 30); i--) {
+      const r = H.writes[i], waited = r.t1 - r.t0;
+      w += `<li><span class="n">#${r.id}</span>${B(r.bytes)}<span class="meta">t ${r.t0}${waited ? `–${r.t1} <span class="tag t-bad">blocked ${waited}</span>` : ''}${tagOf(r.kind)}</span></li>`;
+    }
+    $('wlist').innerHTML = w || '<li><span></span><span class="empty">no write() yet</span><span></span></li>';
+    let r = '';
+    if (P.mode === 'raw') {
+      $('rlistHead').textContent = 'Receiver: what each read() returned';
+      $('rlistSub').innerHTML = 'Same bytes, same order, but cut wherever the buffer happened to be. Compare the colours with the left.';
+      for (let i = st.nR - 1; i >= Math.max(0, st.nR - 30); i--) {
+        const x = H.reads[i];
+        const tg = { whole: ['1 msg', 'ok'], partial: ['partial', 'found'], mixed: ['mixed', 'bad'] }[x.cls];
+        r += `<li><span class="n">${i + 1}</span>${B(x.bytes)}<span class="meta">t ${x.t} <span class="tag t-${tg[1]}">${tg[0]}</span></span></li>`;
+      }
+    } else {
+      const c = s.c;
+      $('rlistHead').textContent = 'Receiver: what each readLine() returned';
+      $('rlistSub').innerHTML = `Underneath, readLine() made <b>${c.reads}</b> read() calls: ${c.whole} whole, ${c.partial} partial, ${c.mixed} mixed. The ↵ framing reassembles them into exactly the messages that were written.`;
+      for (let i = st.nL - 1; i >= Math.max(0, st.nL - 30); i--) {
+        const x = H.lines[i];
+        r += `<li><span class="n">${i + 1}</span>${B(x.bytes.slice(0, -1))}<span class="meta">t ${x.t} <span class="tag t-ok">message ${x.bytes[0].m}</span></span></li>`;
+      }
+    }
+    $('rlist').innerHTML = r || '<li><span></span><span class="empty">nothing returned yet</span><span></span></li>';
+  }
+
+  function updateLog(st) {
+    const a = tickStart(Math.max(0, cur)), lo = Math.max(0, a - 50), hi = Math.min(TL.steps.length, tickEnd(cur) + 25);
+    const aTick = st.t;
+    let h = '';
+    for (let i = lo; i < hi; i++) {
+      const e = TL.steps[i];
+      const act = S.by === 'event' ? i === cur : (e.t === aTick && i <= cur && i >= a);
+      h += `<li data-i="${i}" tabindex="0"${act ? ' class="active"' : ''}><span class="n">t ${e.t}</span>${tagHtml(e.kind)}<span>${e.msg}</span></li>`;
+    }
+    $('log').innerHTML = h;
+    const box = $('logBox'), li = $('log').querySelector('li.active');
+    if (li && (li.offsetTop < box.scrollTop || li.offsetTop + li.offsetHeight > box.scrollTop + box.clientHeight))
+      box.scrollTop = li.offsetTop - box.clientHeight / 2;
+  }
+
+  function updateRules(P) {
+    $('rules').innerHTML = `A TCP connection between two threads. <b>write()</b> copies bytes into the kernel's send buffer and blocks while it is full. ` +
+      `TCP sends at most <b>${rateText(P.bw)}</b>, each segment takes <b>${pl(P.lat, 'tick')}</b> to arrive, and the receiver's ACKs advertise how much room is left (flow control). ` +
+      (P.mode === 'buffered'
+        ? `A <b>BufferedOutputStream</b> collects the bytes and calls write() only on flush() or when it is full; <b>readLine()</b> calls read() until it has a whole line.`
+        : `<b>read(buf)</b> returns whatever bytes are available, up to buf.length, with no notion of messages.`);
+  }
+
+  // ---------- controls ----------
+  const ticksTxt = v => v === 0 ? 'none' : pl(v, 'tick');
+  function syncControls(p) {
+    const set = (id, v) => { const el = $(id); if (el !== document.activeElement || el.type !== 'range') el.value = String(v); };
+    set('sndPause', p.sndPause); $('sndPauseOut').textContent = ticksTxt(p.sndPause);
+    set('bw', p.bw); $('bwOut').textContent = rateText(p.bw);
+    set('lat', p.lat); $('latOut').textContent = pl(p.lat, 'tick');
+    set('mss', p.mss); $('mssOut').textContent = pl(p.mss, 'byte');
+    set('hdr', p.hdr); $('hdrOut').textContent = pl(p.hdr, 'byte');
+    set('rcvPause', p.rcvPause); $('rcvPauseOut').textContent = ticksTxt(p.rcvPause);
+    set('readSize', p.readSize); $('readSizeOut').textContent = pl(p.readSize, 'byte');
+    $('readSizeLab').textContent = p.mode === 'buffered' ? 'BufferedReader size (bytes per read())' : 'read() buffer size (buf.length)';
+    set('sndBuf', p.sndBuf); $('sndBufOut').textContent = pl(p.sndBuf, 'byte');
+    set('rcvBuf', p.rcvBuf); $('rcvBufOut').textContent = pl(p.rcvBuf, 'byte');
+    $('modeSel').value = p.mode;
+    $('bufOpts').hidden = p.mode !== 'buffered';
+    set('bwSize', p.bwSize); $('bwSizeOut').textContent = pl(p.bwSize, 'byte'); $('writeSel').value = p.charLoop ? 'char' : 'whole';
+    $('sndPauseLab').textContent = 'Work before each message'; $('ackSel').value = p.keepUnacked ? 'acked' : 'sent';
+    $('lenSel').value = p.msgLen; $('autoChk').checked = p.auto;
+    [['pauseSnd', 'sndPaused'], ['pauseNet', 'netPaused'], ['pauseRcv', 'rcvPaused']].forEach(([id, k]) => {
+      $(id).setAttribute('aria-pressed', String(p[k])); $(id).textContent = p[k] ? 'Paused · resume' : 'Pause';
+    });
+    document.querySelectorAll('[data-preset]').forEach(b => {
+      const pr = PRESETS[b.dataset.preset].P;
+      b.setAttribute('aria-pressed', String(Object.keys(pr).every(k => p[k] === pr[k]) && p.auto && !p.sndPaused && !p.netPaused && !p.rcvPaused));
+    });
+    $('legendGhost').hidden = !p.keepUnacked;
+  }
+
+  const live = (id, out, fmt) => $(id).addEventListener('input', e => { $(out).textContent = fmt(+e.target.value); });
+  live('sndPause', 'sndPauseOut', ticksTxt); live('bw', 'bwOut', rateText); live('lat', 'latOut', v => pl(v, 'tick')); live('mss', 'mssOut', v => pl(v, 'byte')); live('hdr', 'hdrOut', v => pl(v, 'byte'));
+  live('rcvPause', 'rcvPauseOut', ticksTxt); live('readSize', 'readSizeOut', v => pl(v, 'byte'));
+  live('sndBuf', 'sndBufOut', v => pl(v, 'byte')); live('rcvBuf', 'rcvBufOut', v => pl(v, 'byte'));
+  const onChange = (id, f) => $(id).addEventListener('change', e => f(e.target));
+  onChange('sndPause', el => setParam({ sndPause: +el.value }, p => `The sender now works ${ticksTxt(p.sndPause)} before each message.`));
+  onChange('bw', el => setParam({ bw: +el.value }, p => `The network bandwidth is now ${rateText(p.bw)}.`));
+  onChange('lat', el => setParam({ lat: +el.value }, p => `The one-way latency is now ${pl(p.lat, 'tick')} for new segments and ACKs (those already on the wire keep their arrival time).`));
+  onChange('hdr', el => setParam({ hdr: +el.value }, p => p.hdr ? `Every new packet now carries a ${p.hdr}-byte header, which takes link time like data.` : 'Packets no longer carry headers (an idealised link).'));
+  onChange('mss', el => setParam({ mss: +el.value }, p => `TCP now sends segments of at most ${pl(p.mss, 'byte')}.`));
+  onChange('rcvPause', el => setParam({ rcvPause: +el.value }, p => `The receiver now works ${ticksTxt(p.rcvPause)} after each read.`));
+  onChange('readSize', el => setParam({ readSize: +el.value }, p => `The receiver now reads at most ${pl(p.readSize, 'byte')} per read() call.`));
+  onChange('lenSel', el => setParam({ msgLen: el.value }, p => `Random messages are now ${p.msgLen} words.`));
+  onChange('autoChk', el => setParam({ auto: el.checked }, p => p.auto ? 'The sender keeps writing random messages.' : 'Random messages are off: the sender only writes what you queue.'));
+  onChange('sndBuf', el => restartWith({ sndBuf: +el.value }, p => `Send buffer set to ${pl(p.sndBuf, 'byte')}.`));
+  onChange('rcvBuf', el => restartWith({ rcvBuf: +el.value }, p => `Receive buffer set to ${pl(p.rcvBuf, 'byte')}.`));
+  onChange('modeSel', el => restartWith({ mode: el.value }, p => p.mode === 'buffered'
+    ? 'Both threads now use buffered streams: the sender writes into a BufferedOutputStream and flushes it after each message; the receiver collects lines with BufferedReader.readLine().'
+    : 'Both threads now use the socket\'s own streams: every out.write() is a system call, and the receiver calls in.read(buf).'));
+  live('bwSize', 'bwSizeOut', v => pl(v, 'byte'));
+  onChange('bwSize', el => setParam({ bwSize: +el.value }, p => `The BufferedOutputStream now holds ${pl(p.bwSize, 'byte')}.`));
+  onChange('writeSel', el => setParam({ charLoop: el.value === 'char' }, p => p.charLoop
+    ? `The sender now writes one byte at a time with out.write(c).${p.mode === 'raw' ? ' Without a buffer each call is a system call: one byte per tick.' : ' The BufferedOutputStream turns them into one system call per flush.'}`
+    : 'The sender now writes each message whole with out.write(m.getBytes()).'));
+  onChange('ackSel', el => restartWith({ keepUnacked: el.value === 'acked' }, p => p.keepUnacked
+    ? 'Sent bytes now stay in the send buffer (dashed) until an ACK covers them, as in real TCP.'
+    : 'Sent bytes now leave the send buffer as soon as they are transmitted (simplified).'));
+  const togglePause = k => {
+    const who = { sndPaused: 'sender thread', netPaused: 'network', rcvPaused: 'receiver thread' }[k];
+    setParam({ [k]: !TL.steps[tickEnd(cur)].P[k] }, p => p[k] ? `You paused the ${who}.` : `You resumed the ${who}.`);
+  };
+  $('pauseSnd').addEventListener('click', () => togglePause('sndPaused'));
+  $('pauseNet').addEventListener('click', () => togglePause('netPaused'));
+  $('pauseRcv').addEventListener('click', () => togglePause('rcvPaused'));
+  document.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+  $('undoBtn').addEventListener('click', undo);
+  $('saveBtn').addEventListener('click', saveRun);
+  $('openBtn').addEventListener('click', () => $('openFile').click());
+  $('openFile').addEventListener('change', e => { openFile(e.target.files[0]); e.target.value = ''; });
+  document.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+  document.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) { e.preventDefault(); openFile(f); } });
+  $('restartBtn').addEventListener('click', restartEmpty);
+  $('writeBtn').addEventListener('click', fromInput);
+  $('msgInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fromInput(); } });
+  $('rnd1').addEventListener('click', () => randomQueue(1));
+  $('rnd5').addEventListener('click', () => randomQueue(5));
+
+  const setBy = by => {
+    S.by = by;
+    $('byTick').setAttribute('aria-pressed', String(by === 'tick'));
+    $('byEvent').setAttribute('aria-pressed', String(by === 'event'));
+    if (by === 'tick') cur = tickEnd(cur);
+    showStep(cur, false);
+  };
+  $('byTick').addEventListener('click', () => setBy('tick'));
+  $('byEvent').addEventListener('click', () => setBy('event'));
+  $('speed').addEventListener('input', e => { S.speed = +e.target.value; $('speedOut').textContent = (S.speed / 1000).toFixed(S.speed < 1000 ? 2 : 1) + ' s'; });
+  $('zoom').addEventListener('input', e => { S.zoom = +e.target.value / 100; $('zoomOut').textContent = e.target.value + '%'; redraw(); });
+
+  $('firstBtn').addEventListener('click', () => go(0));
+  $('prevBtn').addEventListener('click', () => go(prevIdx()));
+  $('nextBtn').addEventListener('click', () => { stopPlay(); advance(); });
+  $('lastBtn').addEventListener('click', () => go(TL.steps.length - 1));
+  $('ffBtn').addEventListener('click', () => fastForward(10));
+  $('playBtn').addEventListener('click', togglePlay);
+
+  $('log').addEventListener('click', e => { const li = e.target.closest('li'); if (li) go(+li.dataset.i); });
+  $('log').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { const li = e.target.closest('li'); if (li) { e.preventDefault(); go(+li.dataset.i); } }
+  });
+  $('svg').addEventListener('pointerdown', e => {
+    if (e.button) return;
+    const g = e.target.closest('[data-act]');
+    if (g) togglePause({ snd: 'sndPaused', net: 'netPaused', rcv: 'rcvPaused' }[g.dataset.act]);
+  });
+
+  document.addEventListener('keydown', e => {
+    const tg = e.target instanceof Element ? e.target : document.body;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !tg.closest('input[type=text], textarea')) { e.preventDefault(); undo(); return; }
+    if (tg.closest('input, select, textarea, button, li')) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); stopPlay(); advance(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); go(prevIdx()); }
+    else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && 'snr'.includes(e.key.toLowerCase()))
+      togglePause({ s: 'sndPaused', n: 'netPaused', r: 'rcvPaused' }[e.key.toLowerCase()]);
+  });
+
+  let rt = 0;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(redraw, 80); });
+
+  // theme toggle
+  const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+  const isDark = () => {
+    const a = document.documentElement.getAttribute('data-theme');
+    return a ? a === 'dark' : darkMQ.matches;
+  };
+  const syncThemeBtn = () => { $('themeBtn').textContent = isDark() ? 'Light mode' : 'Dark mode'; };
+  try { const saved = localStorage.getItem('sockets-theme'); if (saved) document.documentElement.setAttribute('data-theme', saved); } catch (e) {}
+  $('themeBtn').addEventListener('click', () => {
+    const next = isDark() ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('sockets-theme', next); } catch (e) {}
+    syncThemeBtn();
+  });
+  darkMQ.addEventListener && darkMQ.addEventListener('change', syncThemeBtn);
+  syncThemeBtn();
+
+  // sample run: a slow reader, already congested
+  startRun(P0, 30, `${PRESETS.reader.text} This run has been going for 30 ticks: press ▶ to continue, → to step, or ← to go back.`);
+  showStep(cur, false);
+})();
+</script>
+</body>
+</html>
