@@ -29,6 +29,7 @@ Finally, a third component provides a general introduction to abstract system mo
 - [Concurrent programming in Java tutorial](https://concjava.github.io/)
 - [Agent skill](https://github.com/distributedum/sd-skill)
 - [Sockets demonstrator](materials/sockets.html)
+- [Serialization demonstrator](materials/serialization.html)
 
 ## Past editions 
 

@@ -156,7 +156,27 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .stepnav button { padding: 6px 8px; display: grid; place-items: center; }
 .stepnav svg { width: 18px; height: 18px; fill: currentColor; display: block; }
 #playBtn { padding: 6px 12px; }
-.stepnav { max-width: 300px; }
+.stepnav { max-width: 340px; }
+#railBtn { margin-right: 6px; }
+/* settings rail: the ☰ button hides it, giving the drawing the full width; then hovering the left edge (or tabbing into
+   it) slides it in over the page until the pointer leaves */
+body.railoff .layout { grid-template-columns: minmax(0, 1fr); }
+body.railoff aside.controls {
+  position: fixed; top: 0; left: 0; bottom: 0; width: 344px; z-index: 50; overflow-y: auto;
+  padding: 16px 16px 24px; background: var(--bg); border-right: 1px solid var(--line); box-shadow: 0 0 28px rgba(0, 0, 0, .22);
+  transform: translateX(-105%); visibility: hidden; transition: transform .18s ease, visibility 0s linear .18s;
+}
+body.railoff aside.controls.peek { transform: none; visibility: visible; transition: transform .18s ease; }
+.railedge { display: none; position: fixed; top: 0; bottom: 0; left: 0; width: 16px; z-index: 49; cursor: e-resize; }
+.railedge::after { content: ""; position: absolute; left: 4px; top: 50%; width: 4px; height: 72px; margin-top: -36px; border-radius: 2px; background: var(--edge); opacity: .55; }
+.railedge:hover::after { background: var(--accent); opacity: 1; }
+body.railoff .railedge { display: block; }
+.railhead { display: none; align-items: center; justify-content: space-between; gap: 8px; }
+.railhead span { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.railhead button { padding: 5px 10px; font-size: 13px; }
+body.railoff .railhead { display: flex; }
+#railBtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { body.railoff aside.controls, body.railoff aside.controls.peek { transition: none; } }
 #counter { flex-basis: 100%; font: 500 13px var(--font-mono); color: var(--muted); margin-top: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 #counter .live { color: var(--ok); font-weight: 600; }
 #counter .replay { color: var(--found); font-weight: 600; }
@@ -338,7 +358,8 @@ code, .code { font-family: var(--font-mono); font-size: .93em; }
   </header>
 
   <main class="layout">
-    <aside class="controls">
+    <aside class="controls" id="rail" aria-label="Settings">
+      <div class="railhead"><span>Settings</span><button id="pinBtn" type="button" title="Keep the settings open (M)">Keep open</button></div>
       <section class="card">
         <h2>Bottleneck scenarios</h2>
         <div class="presets">
@@ -506,10 +527,12 @@ code, .code { font-family: var(--font-mono); font-size: .93em; }
         <p class="hint">The first row counts bytes, the second system calls. A read() is “1 msg” only if it returned exactly one whole message.</p>
       </section>
     </aside>
+    <div class="railedge" id="railEdge" title="Settings (M)" aria-hidden="true"></div>
 
     <section class="board">
       <div class="stepbar">
         <div class="stepnav">
+          <button id="railBtn" type="button" aria-controls="rail" aria-pressed="false" aria-label="Hide settings" title="Hide the settings to give the drawing more room (M). Then hover the left edge to see them."><svg viewBox="0 0 24 24"><path d="M3 5h18v2.4H3zM3 10.8h18v2.4H3zM3 16.6h18V19H3z"/></svg></button>
           <button id="firstBtn" type="button" aria-label="First step" title="First step (tick 0)"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
           <button id="prevBtn" type="button" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M16 5v14L5 12z"/></svg></button>
           <button id="playBtn" type="button" aria-label="Play" title="Play / pause (Space)"><svg viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></svg></button>
@@ -1778,10 +1801,39 @@ code, .code { font-family: var(--font-mono); font-size: .93em; }
     else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
     else if (!e.ctrlKey && !e.metaKey && !e.altKey && 'snr'.includes(e.key.toLowerCase()))
       togglePause({ s: 'sndPaused', n: 'netPaused', r: 'rcvPaused' }[e.key.toLowerCase()]);
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'm') setRail(!document.body.classList.contains('railoff'));
   });
 
   let rt = 0;
   window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(redraw, 80); });
+
+  // settings rail: hidden on request; then the left edge, or focus moving into it, shows it over the page for a while
+  const rail = $('rail');
+  let peekT = 0;
+  const typing = () => rail.contains(document.activeElement) && document.activeElement.matches('select, input[type=text], textarea');
+  function peek(on) {
+    clearTimeout(peekT);
+    if (on) { rail.classList.add('peek'); return; }
+    peekT = setTimeout(() => { if (!rail.matches(':hover') && !typing()) rail.classList.remove('peek'); }, 300);
+  }
+  function setRail(off) {
+    document.body.classList.toggle('railoff', off);
+    rail.classList.remove('peek');
+    $('railBtn').setAttribute('aria-pressed', String(off));
+    $('railBtn').setAttribute('aria-label', off ? 'Show settings' : 'Hide settings');
+    try { localStorage.setItem('sockets-rail', off ? 'off' : 'on'); } catch (e) {}
+    redraw();
+  }
+  $('railBtn').addEventListener('click', () => setRail(!document.body.classList.contains('railoff')));
+  $('pinBtn').addEventListener('click', () => setRail(false));
+  $('railEdge').addEventListener('mouseenter', () => peek(true));
+  $('railEdge').addEventListener('click', () => peek(true));
+  rail.addEventListener('mouseenter', () => { if (document.body.classList.contains('railoff')) peek(true); });
+  rail.addEventListener('mouseleave', () => peek(false));
+  rail.addEventListener('focusin', () => { if (document.body.classList.contains('railoff')) peek(true); });
+  rail.addEventListener('focusout', () => peek(false));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && rail.classList.contains('peek')) { rail.classList.remove('peek'); if (rail.contains(document.activeElement)) document.activeElement.blur(); } });
+  try { if (localStorage.getItem('sockets-rail') === 'off') { document.body.classList.add('railoff'); $('railBtn').setAttribute('aria-pressed', 'true'); $('railBtn').setAttribute('aria-label', 'Show settings'); } } catch (e) {}
 
   // theme toggle
   const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
