@@ -1,0 +1,2211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>C/S Dispatching</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: control rail on the left; on the right, step narration above a stage that draws two clients (left), the
+   network (middle) and the server (right). Threads and messages keep stable ids, so they glide between snapshots. */
+:root {
+  --bg: #ffffff; --panel: #ffffff; --ink: #222222; --muted: #6f6f6f; --line: #e5e5e5;
+  --box: #ececec; --accent: #267cb9; --accent-hover: #006699; --on-accent: #ffffff;
+  --node: #ffffff; --node-stroke: #444444; --slot-empty: #eff1f3; --edge: #9aa0a6; --dot: rgba(0, 0, 0, .08);
+  --cell-stroke: rgba(0, 0, 0, .28);
+  --visit: #2a66c9; --visit-bg: #e2ebfa;
+  --ok: #1d8048; --ok-bg: #dcf1e3;
+  --bad: #c3362b; --bad-bg: #fbe1de;
+  --found: #a86400; --found-bg: #fcecc9;
+  --split: #7448bd; --split-bg: #ece4f9;
+  --idle: #6f6f6f; --idle-bg: #f0f1f2;
+  /* request colours: a request and its reply share one, cycling through 8 */
+  --m0: #e69f00; --m0-ink: #1d1400;
+  --m1: #2f7fc1; --m1-ink: #ffffff;
+  --m2: #f0e442; --m2-ink: #222222;
+  --m3: #009e73; --m3-ink: #ffffff;
+  --m4: #cc79a7; --m4-ink: #1f0a16;
+  --m5: #7cc3ef; --m5-ink: #0b1d29;
+  --m6: #d55e00; --m6-ink: #ffffff;
+  --m7: #8e6cc0; --m7-ink: #ffffff;
+  --font-display: "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-body: "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141619; --panel: #1b1e22; --ink: #e6e6e6; --muted: #9b9fa4; --line: #2e3238;
+    --box: #262a2f; --accent: #5aa9e6; --accent-hover: #80bdee; --on-accent: #0a1a27;
+    --node: #20242a; --node-stroke: #b0b5bb; --slot-empty: #1d2025; --edge: #61676e; --dot: rgba(255, 255, 255, .07);
+    --cell-stroke: rgba(0, 0, 0, .45);
+    --visit: #7eaaf6; --visit-bg: #1b2943;
+    --ok: #5dca8b; --ok-bg: #163222;
+    --bad: #f27c70; --bad-bg: #3d1c19;
+    --found: #f2b74e; --found-bg: #3a2b0f;
+    --split: #b597f2; --split-bg: #2a2142;
+    --idle: #9b9fa4; --idle-bg: #23272c;
+    --m0: #d39300; --m1: #3d8fd0; --m2: #d9ce3c; --m3: #12a57b;
+    --m4: #c873a3; --m5: #6db6e3; --m6: #d7692a; --m7: #9a7fd2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141619; --panel: #1b1e22; --ink: #e6e6e6; --muted: #9b9fa4; --line: #2e3238;
+  --box: #262a2f; --accent: #5aa9e6; --accent-hover: #80bdee; --on-accent: #0a1a27;
+  --node: #20242a; --node-stroke: #b0b5bb; --slot-empty: #1d2025; --edge: #61676e; --dot: rgba(255, 255, 255, .07);
+  --cell-stroke: rgba(0, 0, 0, .45);
+  --visit: #7eaaf6; --visit-bg: #1b2943;
+  --ok: #5dca8b; --ok-bg: #163222;
+  --bad: #f27c70; --bad-bg: #3d1c19;
+  --found: #f2b74e; --found-bg: #3a2b0f;
+  --split: #b597f2; --split-bg: #2a2142;
+  --idle: #9b9fa4; --idle-bg: #23272c;
+  --m0: #d39300; --m1: #3d8fd0; --m2: #d9ce3c; --m3: #12a57b;
+  --m4: #c873a3; --m5: #6db6e3; --m6: #d7692a; --m7: #9a7fd2;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font-body); }
+.wrap {
+  margin: 0 auto;
+  padding-block: 20px 32px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+header.top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.brand { display: flex; align-items: flex-start; gap: 20px; min-width: 0; }
+.brand .logo { margin-top: 4px; }
+.brand .logo { display: block; flex: none; background: #ffffff; border-radius: 4px; line-height: 0; }
+.brand .logo img { width: 96px; height: auto; display: block; }
+.course { margin: 0 0 4px; font-size: 14px; color: var(--muted); }
+.course a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.course a:hover, .course a:focus-visible { color: var(--accent-hover); text-decoration: underline; }
+@media (max-width: 560px) { .brand .logo img { width: 64px; } }
+footer.credit { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; }
+footer.credit a { color: var(--accent); text-decoration: none; }
+footer.credit a:hover { text-decoration: underline; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(26px, 3vw, 36px); letter-spacing: -.02em; margin: 0; line-height: 1.1; text-wrap: balance; }
+.rules { margin: 6px 0 0; color: var(--muted); max-width: 100ch; min-height: 4.5em; }
+.rules b { color: var(--ink); font-weight: 600; }
+
+.layout { display: flex; gap: 20px; align-items: flex-start; }
+.layout > #rail { flex: 0 0 310px; }
+.layout > .board { flex: 1 1 0; }
+.layout > #side { flex: 0 0 280px; }
+/* narrower screens: the right pane wraps below, its cards side by side; phones: one column */
+@media (max-width: 1250px) {
+  .layout { flex-wrap: wrap; }
+  .layout > .board { flex-basis: calc(100% - 330px); }
+  body:not(.sideoff) .layout > #side { flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; }
+  body:not(.sideoff) #side > .card { flex: 1 1 260px; }
+}
+@media (max-width: 900px) { .layout { flex-direction: column; flex-wrap: nowrap; align-items: stretch; } .layout > #rail, .layout > #side { flex: none; } }
+
+.controls { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* side panes: the left button hides the left one and the right-hand button the right one, giving the drawing the width;
+   then hovering that screen edge (or tabbing into the pane) slides it in over the page until the pointer leaves */
+body.railoff #rail, body.sideoff #side {
+  position: fixed; top: 0; bottom: 0; width: 344px; z-index: 50; overflow-y: auto;
+  padding: 16px 16px 24px; background: var(--bg); box-shadow: 0 0 28px rgba(0, 0, 0, .22);
+  visibility: hidden; transition: transform .18s ease, visibility 0s linear .18s;
+}
+body.railoff #rail { left: 0; border-right: 1px solid var(--line); transform: translateX(-105%); }
+body.sideoff #side { right: 0; border-left: 1px solid var(--line); transform: translateX(105%); }
+body.railoff #rail.peek, body.sideoff #side.peek { transform: none; visibility: visible; transition: transform .18s ease; }
+.railedge { display: none; position: fixed; top: 0; bottom: 0; left: 0; width: 16px; z-index: 49; cursor: e-resize; }
+.railedge.right { left: auto; right: 0; cursor: w-resize; }
+.railedge::after { content: ""; position: absolute; left: 4px; top: 50%; width: 4px; height: 72px; margin-top: -36px; border-radius: 2px; background: var(--edge); opacity: .55; }
+.railedge.right::after { left: auto; right: 4px; }
+.railedge:hover::after { background: var(--accent); opacity: 1; }
+body.railoff #railEdge, body.sideoff #sideEdge { display: block; }
+.railhead { display: none; align-items: center; justify-content: space-between; gap: 8px; }
+.railhead span { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.railhead button { padding: 5px 10px; font-size: 13px; }
+body.railoff #rail .railhead, body.sideoff #side .railhead { display: flex; }
+#railBtn[aria-pressed="true"], #sideBtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { body.railoff #rail, body.sideoff #side, body.railoff #rail.peek, body.sideoff #side.peek { transition: none; } }
+.card { position: relative; background: transparent; border: 1px solid var(--box); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.card h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+/* (i) next to a card title: hovering shows the card's explanation over the card, a click keeps it open */
+.infobtn { width: 19px; height: 19px; padding: 0; border-radius: 50%; display: inline-grid; place-items: center; flex: none;
+  font: 700 12px/1 var(--font-body); text-transform: none; letter-spacing: 0; color: var(--muted); cursor: help; }
+.infobtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.tip { position: absolute; left: 10px; right: 10px; top: 40px; z-index: 20; margin: 0; padding: 10px 12px;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+  font-size: 13.5px; line-height: 1.45; }
+.tip b { font-weight: 600; }
+.card h3 { font-size: 14px; margin: 4px 0 0; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card hr { border: 0; border-top: 1px solid var(--box); margin: 2px 0; width: 100%; }
+label { font-weight: 500; font-size: 14px; }
+
+#saveNote { font: 14px/1.4 var(--font-body); padding: 8px 10px; border: 1.5px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); width: 100%; resize: vertical; }
+#saveNote::placeholder { color: var(--muted); opacity: .7; }
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:focus-visible, button:focus-visible, select:focus-visible, #log li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.btnrow > button { flex: 1 1 auto; }
+button { font: 500 14px var(--font-body); padding: 9px 12px; border-radius: 8px; border: 1.5px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; }
+.btnrow.small button { font-size: 13px; padding: 7px 8px; }
+.presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.presets button { padding: 8px 6px; font-size: 13.5px; line-height: 1.3; }
+.presets button[aria-pressed="true"] { border-color: var(--found); color: var(--found); background: var(--found-bg); }
+button.pausebtn { font-size: 12px; padding: 3px 9px; border-radius: 999px; font-weight: 600; }
+button.pausebtn[aria-pressed="true"], button.pausebtn[aria-pressed="true"]:hover:not(:disabled) { background: var(--split-bg); border-color: var(--split); color: var(--split); }
+
+select { font: 14px var(--font-body); padding: 7px 8px; border-radius: 7px; border: 1.5px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+select:disabled { opacity: .55; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > label { display: flex; justify-content: space-between; gap: 8px; }
+output { font-family: var(--font-mono); color: var(--muted); font-size: 13px; font-weight: 400; white-space: nowrap; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+.hint b { color: var(--ink); font-weight: 600; }
+.hint.warn { color: var(--bad); border-left: 3px solid var(--bad); padding-left: 8px; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1.5px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 8px; font-weight: 600; background: var(--panel); color: var(--muted); }
+.seg button + button { border-left: 1.5px solid var(--line); }
+.seg button[aria-pressed="true"], .seg button[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
+.msg { margin: 0; font-size: 14px; min-height: 1.5em; color: var(--muted); }
+.msg.err { color: var(--bad); }
+
+.stats dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; margin: 0; }
+.stats dl > div { display: flex; flex-direction: column; }
+.stats dt { flex: 1; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.stats dd { margin: 0; font: 600 22px var(--font-mono); font-variant-numeric: tabular-nums; }
+.stats dd.bad { color: var(--bad); }
+
+.board { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.stepbar { background: transparent; border: 1px solid var(--box); border-radius: 10px; padding: 12px 14px; display: flex; gap: 10px 16px; align-items: flex-start; flex-wrap: wrap; }
+.stepbar { position: relative; padding-right: 54px; }
+/* the counter wraps under the buttons, so the narration can sit beside them */
+.stepnav { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; max-width: 340px; }
+#railBtn { margin-right: 6px; }
+#railBtn svg, #sideBtn svg { width: 18px; height: 18px; }
+#sideBtn { position: absolute; top: 12px; right: 14px; padding: 6px 8px; display: grid; place-items: center; }
+#sideBtn svg { width: 18px; height: 18px; fill: currentColor; display: block; }
+.stepnav button { padding: 6px 8px; display: grid; place-items: center; }
+.stepnav svg { width: 18px; height: 18px; fill: currentColor; display: block; }
+#playBtn { padding: 6px 12px; }
+#counter { flex-basis: 100%; font: 500 13px var(--font-mono); color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+#counter .live { color: var(--ok); font-weight: 600; }
+#counter .replay { color: var(--found); font-weight: 600; }
+/* fixed height: a longer or shorter narration must not push the drawing up or down */
+#caption { margin: 0; padding-top: 3px; font-size: 17px; flex: 1 1 380px; min-width: 0; line-height: 1.45; height: 172px; overflow-y: auto; }
+#caption ul li { font-size: 15.5px; }
+#caption .tickno { font: 600 13px var(--font-mono); color: var(--muted); letter-spacing: .04em; display: block; margin-bottom: 2px; }
+#caption ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.stage {
+  background-color: transparent;
+  background-image: radial-gradient(var(--dot) 1.1px, transparent 1.4px);
+  background-size: 22px 22px;
+  border: 1px solid var(--box); border-radius: 10px;
+  min-height: 380px; overflow: auto; display: flex; padding: 12px;
+}
+#svg { margin: auto; display: block; flex: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; display: inline-block; }
+.legend .sw { display: inline-flex; gap: 1px; }
+.legend .sw i { border: 0; width: 10px; border-radius: 2px; }
+
+/* message chips used in captions and the log */
+.b { display: inline-block; min-width: 1.3em; padding: 0 5px; text-align: center; font: 600 .92em/1.45 var(--font-mono); border-radius: 3px; white-space: nowrap; }
+.b.rep { border-radius: 999px; }
+.b.cbk { outline: 1.5px dashed var(--ink); outline-offset: -1.5px; }
+.b.fin { background: var(--idle-bg); color: var(--muted); }
+.b.c0 { background: var(--m0); color: var(--m0-ink); } .b.c1 { background: var(--m1); color: var(--m1-ink); }
+.b.c2 { background: var(--m2); color: var(--m2-ink); } .b.c3 { background: var(--m3); color: var(--m3-ink); }
+.b.c4 { background: var(--m4); color: var(--m4-ink); } .b.c5 { background: var(--m5); color: var(--m5-ink); }
+.b.c6 { background: var(--m6); color: var(--m6-ink); } .b.c7 { background: var(--m7); color: var(--m7-ink); }
+
+.panel { border: 1px solid var(--box); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.panel h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.panel .sub { margin: -4px 0 10px; font-size: 13px; color: var(--muted); }
+.resp { display: grid; grid-template-columns: 6.5em minmax(120px, 1fr) minmax(0, 1.6fr); gap: 8px 14px; align-items: center; font-size: 14px; margin-bottom: 12px; }
+.resp .who { font-weight: 600; }
+.resp .bar { height: 14px; border-radius: 4px; background: var(--slot-empty); display: flex; overflow: hidden; }
+.resp .bar > span { height: 100%; }
+.resp .meas { font-size: 13px; color: var(--muted); }
+.resp .meas b { color: var(--ink); font-family: var(--font-mono); }
+.g-w { background: var(--found); } .g-n { background: var(--visit); } .g-q { background: var(--bad); } .g-x { background: var(--ok); } .g-c { background: var(--split); }
+#gantt { width: 100%; height: auto; display: block; }
+#gantt text { font-family: var(--font-body); fill: var(--ink); }
+#gantt .glab { font: 12.5px var(--font-mono); }
+#gantt .gax { font: 11px var(--font-mono); fill: var(--muted); text-anchor: middle; }
+#gantt .gtick { stroke: var(--box); stroke-width: 1; }
+#gantt .gnow { stroke: var(--found); stroke-width: 2; stroke-dasharray: 4 3; }
+#gantt .gend { font-size: 12px; fill: var(--muted); }
+#gantt .gend.bad { fill: var(--bad); font-weight: 600; }
+#gantt .cw { fill: var(--found); } #gantt .cn { fill: var(--visit); } #gantt .cq { fill: var(--bad); } #gantt .cx { fill: var(--ok); } #gantt .cc { fill: var(--split); }
+#gantt .gopen { fill: none; stroke: var(--edge); stroke-dasharray: 3 3; }
+.empty { color: var(--muted); font-style: italic; font-size: 14px; }
+
+.codes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 1200px) { .codes { grid-template-columns: minmax(0, 1fr); } }
+.codes pre { margin: 0; font: 13px/1.5 var(--font-mono); overflow-x: auto; white-space: pre; }
+.codes pre .kw { color: var(--accent); font-weight: 600; }
+.codes pre .cm { color: var(--muted); font-style: italic; }
+
+.logbox { position: relative; max-height: 260px; overflow: auto; background: transparent; border: 1px solid var(--box); border-radius: 10px; }
+.loghead { margin: 0; padding: 10px 14px 4px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+#log { list-style: none; margin: 0; padding: 4px 6px 8px; }
+#log li { display: grid; grid-template-columns: 3.4em 9.4em minmax(0, 1fr); gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; align-items: baseline; font-size: 14px; }
+#log li:hover { background: var(--bg); }
+#log li.active { background: var(--visit-bg); }
+#log .n { font: 12px var(--font-mono); color: var(--muted); text-align: right; }
+#log .tag { justify-self: start; }
+
+.tag { display: inline-block; font: 600 11px/1.6 var(--font-body); letter-spacing: .06em; text-transform: uppercase; padding: 0 7px; border-radius: 999px; vertical-align: 2px; border: 1px solid currentColor; white-space: nowrap; }
+#caption .tag { margin-right: 6px; }
+.t-visit { color: var(--visit); background: var(--visit-bg); }
+.t-ok { color: var(--ok); background: var(--ok-bg); }
+.t-bad { color: var(--bad); background: var(--bad-bg); }
+.t-split { color: var(--split); background: var(--split-bg); }
+.t-found { color: var(--found); background: var(--found-bg); }
+.t-info { color: var(--muted); background: var(--bg); }
+code, .code { font-family: var(--font-mono); font-size: .93em; }
+
+/* drawing */
+#svg text { font-family: var(--font-body); fill: var(--ink); }
+#svg .host { fill: none; stroke: var(--box); stroke-width: 1.5; }
+#svg .host.paused { stroke: var(--split); stroke-width: 2.5; stroke-dasharray: 9 6; }
+#svg .host.s-split { stroke: var(--split); stroke-width: 3; }
+#svg .host.s-ok { stroke: var(--ok); stroke-width: 3; }
+#svg .hosttitle { font-size: 13.5px; font-weight: 700; letter-spacing: .1em; fill: var(--muted); }
+#svg .hosttitle.paused { fill: var(--split); }
+#svg .hostplate { fill: var(--bg); }
+#svg .sub { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 5 4; }
+#svg .subtitle { font-size: 13px; font-weight: 700; letter-spacing: .08em; fill: var(--muted); }
+#svg .lbl { font-size: 14.5px; fill: var(--muted); }
+#svg .lbl .k { font-family: var(--font-mono); font-weight: 600; fill: var(--ink); }
+#svg .lbl .bad { fill: var(--bad); font-weight: 600; }
+#svg .lbl .ok { fill: var(--ok); font-weight: 600; }
+#svg .lbl .sp { fill: var(--split); font-weight: 600; }
+#svg .slot { fill: var(--slot-empty); }
+#svg .qframe { fill: none; stroke: var(--node-stroke); stroke-width: 1.3; }
+#svg .qframe.user { stroke-dasharray: 5 3; }
+#svg .qframe.full { stroke: var(--bad); stroke-width: 2.5; }
+#svg .lane { stroke: var(--edge); stroke-width: 4; stroke-linecap: round; opacity: .5; }
+#svg .lanelab { font-size: 14px; fill: var(--muted); }
+#svg .arrowhead { fill: var(--edge); }
+#svg .hit { fill: transparent; cursor: pointer; }
+#svg .hintclick { font-size: 13px; fill: var(--muted); text-anchor: end; }
+#svg .mini rect { stroke: var(--cell-stroke); stroke-width: 1; }
+#svg .mini text { font: 600 12.5px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+/* threads */
+#svg .tbox { fill: var(--node); stroke-width: 1.6; }
+#svg .tname { font-size: 16px; font-weight: 700; }
+#svg .badge rect { stroke-width: 1.4; }
+#svg .badge text { font: 700 12px var(--font-body); letter-spacing: .06em; dominant-baseline: central; }
+#svg .prog { fill: var(--slot-empty); } #svg .prog.done { fill: var(--ok); }
+#svg .ring { fill: none; stroke-width: 3; }
+#svg .ring.s-ok { stroke: var(--ok); } #svg .ring.s-bad { stroke: var(--bad); } #svg .ring.s-split { stroke: var(--split); }
+#svg .ring.s-visit { stroke: var(--visit); } #svg .ring.s-found { stroke: var(--found); }
+#svg .st-run .tbox { stroke: var(--ok); }
+#svg .st-run .badge rect { fill: var(--ok-bg); stroke: var(--ok); } #svg .st-run .badge text { fill: var(--ok); }
+#svg .st-blocked .tbox { stroke: var(--bad); stroke-width: 2.6; }
+#svg .st-blocked .badge rect { fill: var(--bad-bg); stroke: var(--bad); } #svg .st-blocked .badge text { fill: var(--bad); }
+#svg .st-idle .tbox { stroke: var(--edge); }
+#svg .st-idle .badge rect { fill: var(--idle-bg); stroke: var(--idle); } #svg .st-idle .badge text { fill: var(--idle); }
+#svg .st-paused .tbox { stroke: var(--split); stroke-width: 2.4; stroke-dasharray: 7 4; }
+#svg .st-paused .badge rect { fill: var(--split-bg); stroke: var(--split); } #svg .st-paused .badge text { fill: var(--split); }
+#svg .st-cb .tbox { stroke: var(--split); stroke-width: 2.6; }
+#svg .st-cb .badge rect { fill: var(--split-bg); stroke: var(--split); } #svg .st-cb .badge text { fill: var(--split); }
+/* messages */
+#svg .cell { stroke: var(--cell-stroke); stroke-width: 1; }
+#svg .ct { font: 600 15px var(--font-mono); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+#svg .cell.c0 { fill: var(--m0); } #svg .ct.c0 { fill: var(--m0-ink); }
+#svg .cell.c1 { fill: var(--m1); } #svg .ct.c1 { fill: var(--m1-ink); }
+#svg .cell.c2 { fill: var(--m2); } #svg .ct.c2 { fill: var(--m2-ink); }
+#svg .cell.c3 { fill: var(--m3); } #svg .ct.c3 { fill: var(--m3-ink); }
+#svg .cell.c4 { fill: var(--m4); } #svg .ct.c4 { fill: var(--m4-ink); }
+#svg .cell.c5 { fill: var(--m5); } #svg .ct.c5 { fill: var(--m5-ink); }
+#svg .cell.c6 { fill: var(--m6); } #svg .ct.c6 { fill: var(--m6-ink); }
+#svg .cell.c7 { fill: var(--m7); } #svg .ct.c7 { fill: var(--m7-ink); }
+#svg .cell.fin { fill: var(--idle-bg); stroke: var(--edge); } #svg .ct.fin { fill: var(--muted); }
+#svg .msg.cbk .cell { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 4 3; }
+#svg .msg.hot .cell { stroke: var(--found); stroke-width: 4; stroke-dasharray: none; }
+#svg .msg.wrong .cell { stroke: var(--bad); stroke-width: 4; stroke-dasharray: none; }
+#svg .wrongx { font: 700 16px var(--font-body); fill: var(--bad); }
+#svg .more { font: 600 13px var(--font-mono); fill: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <a class="logo" href="https://distributedum.github.io/ds/" title="Distributed Systems course page"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAaUAAAFICAMAAADH1hHAAAAA0mVYSWZJSSoACAAAAAoAAAEEAAEAAAClAQAAAQEEAAEAAABIAQAAAgEDAAMAAACGAAAAEgEDAAEAAAABAAAAGgEFAAEAAACMAAAAGwEFAAEAAACUAAAAKAEDAAEAAAACAAAAMQECAA8AAACcAAAAMgECABQAAACsAAAAaYcEAAEAAADAAAAAAAAAAAgACAAIAEgAAAABAAAASAAAAAEAAABHSU1QIDMuMC4wLVJDMgAAMjAyNTowMToxOCAyMDo1NDoyMAABAAGgAwABAAAAAQAAAAAAAACGG2U6AAABfmlDQ1BJQ0MgcHJvZmlsZQAAeJx9kTtIA0EURc9uFEWUgKYQsdhCrbTxh2AToxCECCEqJGrhfkwMZDdhN8EmpWAbsPDTGLWwsdbWwlYQBD8g9oKVoo2ElckGEsT4mjncefcx7w7I5YxuOi1BMK28HQuHlHhiRWl7RaKbABNMq7qTm4lGIzStr3skcd6NiFnN+/6sLmPD0UFSgKCes/MgrQOTW/mc4H0goG+qBkjnwLAdT6yA9Ch0zeM3wakqy2JmwF6KzYIcAJRUA2sNrG/aJsjjwIBhWgbIcY8NwUXBZqag194pNuzcsJYXhQ70E2aeBaIoaBRIkyHPCGksFBxihAk18fdV/VEKaGRIo6MwRxYTtepH/MHvbJ3k2Kg3qTMErS+u+zEIbbtQKbnu97HrVk7A9wxXVt2fLcPUJ/hKdW3gCPzbcHFd17Q9uNyB3qecaqtVyQfIySS8n0FXAnpuoWPVy612z+kDLBUhcgMHhzCUAv9ak73bG3P7t6eW3w8ZKnLpf5uDuAAADXppVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+Cjx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IlhNUCBDb3JlIDQuNC4wLUV4aXYyIj4KIDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+CiAgPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIKICAgIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIgogICAgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIKICAgIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIKICAgIHhtbG5zOkdJTVA9Imh0dHA6Ly93d3cuZ2ltcC5vcmcveG1wLyIKICAgIHhtbG5zOnRpZmY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vdGlmZi8xLjAvIgogICAgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIgogICB4bXBNTTpEb2N1bWVudElEPSJnaW1wOmRvY2lkOmdpbXA6OTNiMzc4ZTgtN2EzYS00YzFmLWI0ZDEtZWVjYjI1NDk2M2JiIgogICB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjdjM2JmNjgyLTEyOWItNDIxZS04NTg3LThmYjRkOTczMTc2OSIKICAgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjk2MjYzYjQyLTU3N2EtNDg4MC1iNGE2LWE0ZTljNjdlNTY2NiIKICAgZGM6Rm9ybWF0PSJpbWFnZS9wbmciCiAgIEdJTVA6QVBJPSIzLjAiCiAgIEdJTVA6UGxhdGZvcm09IkxpbnV4IgogICBHSU1QOlRpbWVTdGFtcD0iMTczNzIzMzY2MjQxMjM1MyIKICAgR0lNUDpWZXJzaW9uPSIzLjAuMC1SQzIiCiAgIHRpZmY6T3JpZW50YXRpb249IjEiCiAgIHhtcDpDcmVhdG9yVG9vbD0iR0lNUCIKICAgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNTowMToxOFQyMDo1NDoyMCswMDowMCIKICAgeG1wOk1vZGlmeURhdGU9IjIwMjU6MDE6MThUMjA6NTQ6MjArMDA6MDAiPgogICA8eG1wTU06SGlzdG9yeT4KICAgIDxyZGY6U2VxPgogICAgIDxyZGY6bGkKICAgICAgc3RFdnQ6YWN0aW9uPSJzYXZlZCIKICAgICAgc3RFdnQ6Y2hhbmdlZD0iLyIKICAgICAgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDoxODM0ODVhMy05ZjdmLTQ0MWQtYjc5ZC1hNjA2NzRjYzQxZjciCiAgICAgIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkdJTVAgMy4wLjAtUkMyIChMaW51eCkiCiAgICAgIHN0RXZ0OndoZW49IjIwMjUtMDEtMThUMjA6NTQ6MjIrMDA6MDAiLz4KICAgIDwvcmRmOlNlcT4KICAgPC94bXBNTTpIaXN0b3J5PgogIDwvcmRmOkRlc2NyaXB0aW9uPgogPC9yZGY6UkRGPgo8L3g6eG1wbWV0YT4KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgIAo8P3hwYWNrZXQgZW5kPSJ3Ij8+RU8QCAAAAwBQTFRFAAAAAQEBAgICAwMDBAQEBQUFBgYGBwcHCAgICQkJCgoKCwsLDAwMDQ0NDg4ODw8PEBAQEREREhISExMTFBQUFRUVFhYWFxcXGBgYGRkZGhoaGxsbHBwcHR0dHh4eHx8fICAgISEhIiIiIyMjJCQkJSUlJiYmJycnKCgoKSkpKioqKysrLCwsLS0tLi4uLy8vMDAwMTExMjIyMzMzNDQ0NTU1NjY2Nzc3ODg4OTk5Ojo6Ozs7PDw8PT09Pj4+Pz8/QEBAQUFBQkJCQ0NDRERERUVFRkZGR0dHSEhISUlJSkpKS0tLTExMTU1NTk5OT09PUFBQUVFRUlJSU1NTVFRUVVVVVlZWV1dXWFhYWVlZWlpaW1tbXFxcXV1dXl5eX19fYGBgYWFhYmJiY2NjZGRkZWVlZmZmZ2dnaGhoaWlpampqa2trbGxsbW1tbm5ub29vcHBwcXFxcnJyc3NzdHR0dXV1dnZ2d3d3eHh4eXl5enp6e3t7fHx8fX19fn5+f39/gICAgYGBgoKCg4ODhISEhYWFhoaGh4eHiIiIiYmJioqKi4uLjIyMjY2Njo6Oj4+PkJCQkZGRkpKSk5OTlJSUlZWVlpaWl5eXmJiYmZmZmpqam5ubnJycnZ2dnp6en5+foKCgoaGhoqKio6OjpKSkpaWlpqamp6enqKioqampqqqqq6urrKysra2trq6ur6+vsLCwsbGxsrKys7OztLS0tbW1tra2t7e3uLi4ubm5urq6u7u7vLy8vb29vr6+v7+/wMDAwcHBwsLCw8PDxMTExcXFxsbGx8fHyMjIycnJysrKy8vLzMzMzc3Nzs7Oz8/P0NDQ0dHR0tLS09PT1NTU1dXV1tbW19fX2NjY2dnZ2tra29vb3Nzc3d3d3t7e39/f4ODg4eHh4uLi4+Pj5OTk5eXl5ubm5+fn6Ojo6enp6urq6+vr7Ozs7e3t7u7u7+/v8PDw8fHx8vLy8/Pz9PT09fX19vb29/f3+Pj4+fn5+vr6+/v7/Pz8/f39/v7+////4rBdfQAAAAlwSFlzAAALEwAACxMBAJqcGAAAAAd0SU1FB+kBEhQ2FlwIecYAAAAZdEVYdENvbW1lbnQAQ3JlYXRlZCB3aXRoIEdJTVBXgQ4XAAAPt0lEQVR42u2dMXejOhbH6fA5W+CSFLhwirjZ16cjjdNsqu2cajvotstUM11e9VKOu5ePMK+Lu+cSSvIRTLkt1CwgIV2BZAO2M86Z/3/PznNsCcT9ca+uhAArtKDLFyiBEnQaBTABKEGghH4Jgi9B8CX4EgRKECihX4LgS/AlCL4EgRIiHgRKECIeKEGIeBB8CZQgUEK/BMGXIFBCxIPgSxB8Cb4EgRKEiAdfgkAJEQ+CL0GgBErQr0Npvi6KdDWBtS+Y0uS9qJUtYe7LpfRSNLqFvS81E58LSEUKe18qpVRSKq5h8AuNeARSgYzyQik5oPQJIp4HSqCEiAdKoARdEKUZKH22fglXsz5DxAMl5HigBEq/TvaAiIdMHJTgS8jxIEQ8UIIvYe4Bgi/BlzDbiuwBlOBLyB4gUELEs06wHg+UPsiX7FUUracDKrwTSqv+1ZwvefqGtbDjfGme1+ZeO71rfCeU7N6MXlmFFxAa4Uu3wuDPfS0+yWSdvv4a5k0VYBruS04u/SJ76FnJzQda/BY3ABxFKaCpQJHO+9X6bVuVznu6rbtVdrIFo6ERLylUpX7ffNzrmXDYv7d2UbiANNCXio6285M25y7v7MEDpGG+NCk0GpDuHdL1u2b7oHS8Lw3ocA5putZufgpIA/ulZ60di/QUtzWHuXbbb2A0eFSb6DEV26sj23G70284uwKjwZQcE6ZibR/RCmdr2OoOGd6YGaLJ2oQpG909TZ5Pvslf/srF1HTeF7tx3ZOfGbb36oDP+OtL17vidN3T3BRDd3PQOe4q4ENu7J6GPRPKMQXQHMHu+KuAtqkrKfKHIXvPTwMblAZ3T30nYdW5b6oEwe5k6x6mxnSvl5WvTYwyH1hOue7B2PMXr9PRrhjaoHLiNUS+MY3Yey3X3K1tMW13hpVedlgMz9KMKeIOzzk803q8ZiGJJo3wh3VIyL7PuR7v2tg9ba8HdEjfMdVw3lWTe7onq9e1D2TfH7ECeWLsntSFQz9M2fcDUHzECmRj93RPzwmTx2Gq4aPWiRuyglyWcA29Fy4ifeRqfn2GLZMCf0AmCJ3tngvtaFUuAnrS/Bog2H38nTGaa+Punm5pi+z759xl1p7pziz9HWdDZs9B6Qz+mRnuLJsoP+S4y/an3rFpk2saCZ11XZ5nTSz6pXESN07krv79MQnueLmE+2pvN/X8afv6xbJO1hNk35f9jk3b8zzEOrwJFREPAiUIEQ+UIFACpY/ZzQzZ96VnD+wybn4Pa18wpasMT6u5+IjnZHjw2uVTIvPjGZaA/9SI59m9nhFhfD6e62GFypl9af6+b5FJj6fr1tc5UqwRP6MviduYXsY+t/U+wyKI81Kyw6zY+8TBw5R8LCg69/1Lyu3q16Oe+r7DrTFn9aX2zRbrMb60wNqvc/pSd2X4bgylTWcdJfL1k/mSdhnrGEpxd00yVq6ciJJ2SXg+pl+K8GybM1Hy+z/L7iClhf4+DHA6ktLccNNl7o7KxA1PNUL3dEz2YHx0UHE/7k2obo4b1k9MyTY+Oihfjn1Llp3g4Q8npeSanzXpHPFmH9MDILIlCA2n5JgcyfxY8X7vX7JNYRSYhmcPhjucd7519HsB54ZndeAWp6GUJiMeedL/XWb6Hg9Pqh5KyRvxwMEBb5zTPgl5B0bHUzo4+hz0XkDdU8XBaGD24Ix4rOSwtzdOgs4uwGhojpcOf0Tr0Hdstl6/hH5peI73qJh8cp53P6uThMjxho9qnwe/eGnE+2rpRRGstBwzQ/RqfPDdKd+jLqY4AGncnPhdFEVv87O/7f4xwSOKPnCdON7Q/eko4f5QUEL2MFozRDz4EijBl36ZiAdfQr8ESmegBF9C9gBfwtwDsgcIvoR+CZRACUK/BF+CL2G8hIgHX0K/BKFfAiX4EiIehOwBEe+Q4EufgRK9X9qHwS//ua05HrRxsc9AztEtfYLniYtno+AGiot+Nv86H3QzDfST3nOBt8zhLVmgBIEShLdkgRKEiAfBl+BLECiBEgRKELIH+BIEX4LgS6AEgRKEfgmUIFACJQjZAwRKoAShX4JACREPgi9B8CX4EgRfAiUIlCD0S/AlCL4EHdCPIAiDSmHI/8/+5l/yr9hP5T+h+FmUDdlPdRFWuCnBSom/gkBsOAxZLVa53ir/h9Zhf4StffFyvElioyHdrWwvb5ncT3Ogyr7kZkN60GKHgTg6oaZSc2Btq4WhOOhQNDAkhhKHHBJbiXYG5NvAKqDLFyiBEgRKoASBEgRKoASBEgRKoASBEihBoASBEihBoASBEihBoASBEihBoARKEChBoARKEChBoARKEChBoARKECiBEgRKECiBEgRKECiBEgRKECiBEgRKoASBEgRKoASBEgRKoASBEgRKoASBEihBoASBEihBoASBEihBoASBEihBoARKEChBoARKEChBoARKEChBoARKECiBEgRKECiBEgRKECiBEgRKEKGUBkEQBuE39kUQhtWf5hp/VQWCbydtxdewVGeb5Vfl17s+G6gOIAj+GrbXuk7wo0fJNGQ2Kv/3hX/1o/qi3kD4tfr7W93ar/vMVhb+OppSZNXy+BdMewxCS59InnabrCVRr8OoFQ489t6VYksqp2aQ7fYOmOUos0lKs89PKRhDqU+liFDa0CZ/OCUPlHpR4uXtD6YU/3xKs58Y8YZSYq1MrYGUQvjSMb4UDqTETPNmXXa/9IH556X5kicbVBv9H1Z/0wfUyOf3pY+mFF9Ojue51b9PwnWCwZTO0C9lURxHUXXqJCvPcV/52KH8Lo6SIqn+G3MbVp+iKGMF1gtvNlttNHt7u/GS+sPfwc3MWzw1Y6EkYttk2vkT19+2KeVvK6+Uv07JBrOH8pu/O24RBWXJm6dUf8x5VWnbqVS2e8J+MFGaLap/b6pvptWnv4nlkrhSolRLnmbe7LVNKQ692SJRinmW56124yjxH4rUZx+ulN090YNkn6uzrClsWfaDcohR8e7weLFzmzJuQvolHg7u2U/XmUKJjE+c16b1L2pR7hZbp7V5VUv22zxTKL2LNtmhKeLN6hTAbpIHN+70SzNitvyBN0IxW8Ib9yCOweke1xBKvG2JSDpDuruUVOObKM+Gd5KhWktKKWbbKSklpIz93qZ0K0xMKGUu7b+tF9bW31tFmcH/SwpOupja22dM/ui2WxPxNswgRVF/8GPSo8vsoTHbVbO578RsgdgPd50HzXGN8aVWMiNSSnaU1ZnF/ao8afKJUiGkvmRzl1ItvmglSC/tndaUFup3dn2Ir+2iNaWtWjJrHbC+UmuvS0PEY+635jZfx9ocr2M2R5qNyKeB4wCmHr7USkIFJR7yqrOVRblVUay4bbyJPGH49oMm8H1nhojeWJlMOcTM0lHaNafJnS1Nm03bRauTIuMBZDqjxpAdmaOtxJvrNuf/Vu9LxRXfZN3gNOpHyUrViE2M2ZxSHm/WJB/tS7ebjS2JCErcdOWZxRpf/erwkN+cJH6n1XFxU3PMa7ZTr04n5CFuOObHzS2hFAjbpbbYbjNkWb3dEoOv2cdyDjV1aWThara/2tBKfPt/lGZj27/WZ+LsLHTYzMOkiLT9UnNy37492nIw0VBaRQEx8Zy1JhG8gsGZeCy9cC13F4rmOMJg7DwQxXYiC7IppUmQ5FHOjyftzj3MhFfW6F8kpZfwpvROXz1n7zpFA6VRvDVPyvF2t19RcmXwfbY0bEUHxM6MPGXF91J6kSeSNFvdTz4LE+cy6+L9pTM24pGPkTLV8dj0RnFjGZ9syW8qN5SuUjrR8FuU6+YeHNJW3ag2d0VRj4zshMFTctypJuRpK5EUtTnSJ33E4x3TEyuyN+K1hnxkhkjaNSJdbyTD1ZGU1N0lze9PzWQxt3F9ieqfLUp2rp7OZTkxNhGHmNK8q00pL0caJI8hXiMNzhv67/rKj2Yg2a0UyCzUOCMhk7n6JPFDZk9quVk7xzNTkhhDUjTaM9WyL+LpfYkcu8O/fGzKdXrIqkbUGuO/0/RnrVKK6dUBZby0e3Ja2WYXaKDruj3jrJD4/ETnW3SUpIke5ei2MES8ri9FJkoL0sKxlGKtLxFKK26nWRPVLV2G1tm930l6D1Nadk2vNfhbpwXK1Nn/2He/qw4YHqIknabOPhyPbbcvpZbZZAE6ToyP96VY60sb3umKDlnrS53dZ7e0xJqGi0gf8fKmxsSzxYFpfSnaT0mDVk8pNPgSS2xtxXEP9kuRqV+iE+nxnmlLSwxR9vpS3A6wM3kpzElE0qadfdTsPvVdZcwnWptYnX4jFk5rzWN6+tm6LiY6MEXLKt1pO7PISClu94bK+dcre9D6UtAkx4d9SZ0GHxLxeOyKxWzVlW563hBwo8DRnFMO2YLcJ/v2P2pkoZcOBaX8wOUOT1eJ5nj8PHkzUfLJ+odonC/F7RwvkfM3Vmai5JHx9ppMrB7MHngvcCcOkYaO13rNTao9Scr59FyM6ZRD9MkSkHb+0bqs65PDaifVj3VOWOaaUZToxkuZjtKCGCDXzrbKYXFt2pD4XWe81IcSPT18MjWro9RM6yRF+jTpDh3M/RIPIJ4YpfLpiGd5TmoorcTJuupS4gPz0m3ye1GPjKnXdnuaYilzi0AcbDWa5+NEXzf3cF8G+ntdJT6DtDDMPQhnrQN1QHo5b08mrk4G0AIsybvKhb2+GCltu53+ztwvKZSE//NzgM+Kup4nO5h2xGM2d1K+36niIM2MnetNZfznwcDxZg5NCabN11dk4pQf7WTmuTI76XRMZSWnW8lehfpKtANypbcGHV8a2C81RzYNmrny1Ly2ddmG9FLoKUXtZRab1sqaH3Z3nrET8dR587WakT5ocvlMPwj6Uzdx2t7AvHXAD9o58da3ruH6kgwFJJHqF/H0lAr1ioy86qRbgbzUzp/38CWx4KmJ/qpf/qnNHh47ViR9OrmucS/q3WknlOWlIuuGnCrXtNxVZry+ZC2ljdWrKW5WmH1pIy/YhNqIN2CGSL3WVgfifevEA1J4vi06lCITJd9qTRK+2u1rqt3sgZy5y7ydeYlrCy+RHC/Nm/LXW3KIWfP1v3YkfabDsetuypQ38fGPmFYibG8z0+qUQlxb8YuWL80O5HhkdQotUCTTzlK/Pav51+VKgZnnLUKZE2VRtRyBXSuN65UJlUl39WIIsUahXhuhXO/flhuaVcsO+MGSugIlIzFdvYt1D7FY95Cvq5b4abGrs0Q2O71dVIseyoUSaVgvyG6SgerrsmihLPnOwllV2ltttcseWKVyU3WlZnH55obN4usWPuR1+3gDy09xVPcfaVR9ZJ+TqFn3sAvkSvug1q42VNSsi8jiul7T2DUbqTt7Fj7gnosCd8ZAJ9H/ATa9vKX8nrDMAAAAAElFTkSuQmCC" alt="Universidade do Minho"></a>
+      <div>
+        <p class="course"><a href="https://distributedum.github.io/ds/">Distributed Systems</a> · Bachelor in Informatics Engineering</p>
+        <h1>C/S Dispatching</h1>
+        <p class="rules" id="rules"></p>
+      </div>
+    </div>
+    <button id="themeBtn" type="button">Dark mode</button>
+  </header>
+
+  <main class="layout">
+    <aside class="controls" id="rail" aria-label="Settings">
+      <div class="railhead"><span>Settings</span><button id="pinBtn" type="button" title="Keep the settings open (M)">Keep open</button></div>
+
+      <section class="card">
+        <h2>Scenario<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipScen" aria-label="About scenarios">i</button></h2>
+        <p class="tip" id="tipScen" role="tooltip" hidden>Each scenario sets every option and restarts from tick 0, already a few ticks in. Restart at tick 0 starts again with the current options. Undo (Ctrl+Z) takes back the last change.</p>
+        <div class="presets">
+          <button type="button" data-preset="single">One client at a time</button>
+          <button type="button" data-preset="lock">One pending request</button>
+          <button type="button" data-preset="hol">Head-of-line blocking</button>
+          <button type="button" data-preset="wrong">Replies out of order</button>
+          <button type="button" data-preset="stall">Slow client stalls the pool</button>
+          <button type="button" data-preset="writer">Writer thread helps</button>
+          <button type="button" data-preset="orbrd">Callbacks in the reader</button>
+          <button type="button" data-preset="orb">Callbacks (ORB)</button>
+        </div>
+        <div class="btnrow small">
+          <button id="restartBtn" type="button" title="Start again at tick 0 with the current options">Restart at tick 0</button>
+        </div>
+        <div class="btnrow small">
+          <button id="undoBtn" type="button" title="Undo the last change (Ctrl+Z)">Undo</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Server dispatching<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipSrv" aria-label="About server dispatching">i</button></h2>
+        <p class="tip" id="tipSrv" role="tooltip" hidden><span id="srvTip"></span> Changing the server or the pool restarts the run and replays the same number of ticks.</p>
+        <div class="field">
+          <label for="srvSel">Server threads</label>
+          <select id="srvSel">
+            <option value="single">Single thread: one client until it disconnects</option>
+            <option value="conn">Thread per connection</option>
+            <option value="req">Thread per request</option>
+            <option value="pool">Thread pool: workers write their replies</option>
+            <option value="writer">Thread pool + writer thread per connection</option>
+            <option value="orb">Symmetric (ORB): pool + writer, with callbacks</option>
+          </select>
+        </div>
+        <div class="field" id="poolField">
+          <label for="pool">Workers in the pool <output id="poolOut"></output></label>
+          <input type="range" id="pool" min="1" max="4" step="1">
+        </div>
+      </section>
+
+      <section class="card" id="cbCard">
+        <h2>Callbacks<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipCb" aria-label="About callbacks">i</button></h2>
+        <p class="tip" id="tipCb" role="tooltip" hidden>Halfway through its work, the handler sends a request to a client (a callback) and waits for the reply in the server's pending table. Each client runs the same middleware as the server: a reader, a writer with an outgoing queue, a pending table and, unless it handles callbacks in its reader, a work queue and pool. A callback takes 2 ticks to handle. Which handlers and which client apply from the tick on screen; how the client handles callbacks restarts the run.</p>
+        <div class="field">
+          <label for="cbSel">Handlers that send a client a request</label>
+          <select id="cbSel">
+            <option value="none">None</option>
+            <option value="some">About 1 in 3</option>
+            <option value="all">Every handler</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cbToSel">Which client</label>
+          <select id="cbToSel">
+            <option value="other">The other client (like a chat or a subscription)</option>
+            <option value="caller">The client that sent the request</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cbInSel">The client handles callbacks</label>
+          <select id="cbInSel">
+            <option value="pool">With a work queue and pool, like the server</option>
+            <option value="reader">In its reader thread</option>
+          </select>
+        </div>
+        <div class="field" id="cbPoolField">
+          <label for="cbPool">Workers in each client's pool <output id="cbPoolOut"></output></label>
+          <input type="range" id="cbPool" min="1" max="2" step="1">
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Clients<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipStub" aria-label="About the clients">i</button></h2>
+        <p class="tip" id="tipStub" role="tooltip" hidden><span id="stubTip"></span> Changing the thread mode or counts restarts the run and replays the same number of ticks. Pause acts from the tick on screen: a paused client runs no thread at all, so nothing reads its connection: think of a long GC pause or a breakpoint. You can also click a client in the drawing, or press <b>1</b> or <b>2</b>.</p>
+        <div class="field">
+          <label for="stubSel">Threads and pending requests</label>
+          <select id="stubSel">
+            <option value="single">Single thread: send, then wait for the reply</option>
+            <option value="lock">Threads, one pending request (a lock)</option>
+            <option value="fifo">Threads, pending queue: replies in order</option>
+            <option value="tag">Threads, pending table: replies by id</option>
+          </select>
+        </div>
+        <p class="hint warn" id="mixWarn" hidden></p>
+        <div id="thrFields" class="field" style="gap: 12px">
+          <div class="field">
+            <label for="thr1">Client 1 threads <output id="thr1Out"></output></label>
+            <input type="range" id="thr1" min="1" max="3" step="1">
+          </div>
+          <div class="field">
+            <label for="thr2">Client 2 threads <output id="thr2Out"></output></label>
+            <input type="range" id="thr2" min="1" max="3" step="1">
+          </div>
+        </div>
+        <h3>Client 1 <button class="pausebtn" id="pause1" type="button" aria-pressed="false">Pause</button></h3>
+        <h3>Client 2 <button class="pausebtn" id="pause2" type="button" aria-pressed="false">Pause</button></h3>
+      </section>
+
+      <section class="card">
+        <h2>Workload and network<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipWork" aria-label="About the workload and network">i</button></h2>
+        <p class="tip" id="tipWork" role="tooltip" hidden>These apply from the tick on screen; ticks recorded after it are discarded (Ctrl+Z brings them back). A connection holds at most its capacity in messages in transit, travelling or unread; a full one blocks write().</p>
+        <div class="field">
+          <label for="execSel">Execution time at the server</label>
+          <select id="execSel">
+            <option value="const">Constant: 3 ticks</option>
+            <option value="uniform">Random: 1 to 6 ticks</option>
+            <option value="bimodal">Mostly quick (1), sometimes slow (8)</option>
+            <option value="split">Client 1 slow (6), Client 2 quick (1)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="think">Think time between requests <output id="thinkOut"></output></label>
+          <input type="range" id="think" min="0" max="10" step="1">
+        </div>
+        <div class="field" id="sessionField">
+          <label for="session">Requests per connection <output id="sessionOut"></output></label>
+          <input type="range" id="session" min="1" max="13" step="1">
+        </div>
+        <div class="field">
+          <label for="lat">Network latency (one way) <output id="latOut"></output></label>
+          <input type="range" id="lat" min="1" max="4" step="1">
+        </div>
+        <div class="field">
+          <label for="cap">Connection capacity, each way <output id="capOut"></output></label>
+          <input type="range" id="cap" min="1" max="4" step="1">
+        </div>
+      </section>
+    </aside>
+    <div class="railedge" id="railEdge" title="Settings (M)" aria-hidden="true"></div>
+
+    <section class="board">
+      <div class="stepbar">
+        <div class="stepnav">
+          <button id="railBtn" type="button" aria-controls="rail" aria-pressed="false" aria-label="Hide settings" title="Hide the settings to give the drawing more room (M). Then hover the left edge to see them."><svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 4h18v16H3zM10 6v12h9V6z"/></svg></button>
+          <button id="firstBtn" type="button" aria-label="First step" title="First step (tick 0)"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+          <button id="prevBtn" type="button" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M16 5v14L5 12z"/></svg></button>
+          <button id="playBtn" type="button" aria-label="Play" title="Play / pause (Space)"><svg viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></svg></button>
+          <button id="nextBtn" type="button" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+          <button id="lastBtn" type="button" aria-label="Latest step" title="Jump to the latest recorded step"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+          <button id="ffBtn" type="button" aria-label="Run 10 ticks" title="Run 10 more ticks at once"><svg viewBox="0 0 24 24"><path d="M3 5v14l9-7zM12 5v14l9-7z"/></svg></button>
+          <span id="counter"></span>
+        </div>
+        <div id="caption" aria-live="polite"></div>
+        <button id="sideBtn" type="button" aria-controls="side" aria-pressed="false" aria-label="Hide the status and display pane" title="Hide the status and display pane on the right (R). Then hover the right edge to see it."><svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 4h18v16H3zM5 6v12h9V6z"/></svg></button>
+      </div>
+
+      <div class="stage" id="stage"><svg id="svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two clients, the network and the server, with their threads and messages"></svg></div>
+
+      <div class="legend">
+        <span><span class="sw"><i style="background:var(--m0)"></i><i style="background:var(--m1)"></i><i style="background:var(--m2)"></i><i style="background:var(--m3)"></i><i style="background:var(--m4)"></i></span>One colour per request: request <span class="b c1">#5</span>, reply <span class="b c1 rep">↩5</span></span>
+        <span><span class="b c1 cbk">cb5</span> Callback: a request the server sends while handling #5</span>
+        <span><i style="background:var(--ok-bg);border-color:var(--ok)"></i>Thread running</span>
+        <span><i style="background:var(--bad-bg);border-color:var(--bad)"></i>Blocked · wrong reply</span>
+        <span><i style="background:var(--idle-bg);border-color:var(--idle)"></i>Waiting for work, a message or a client</span>
+        <span><i style="background:var(--split-bg);border-color:var(--split)"></i>Paused · callback</span>
+        <span><i style="background:transparent;border-color:var(--found)"></i>In focus this step</span>
+      </div>
+
+      <div class="panel">
+        <h2>Response time: where does it go?</h2>
+        <p class="sub">Each request, from the moment a client thread wants to send it to the moment its reply is read, one cell per tick.
+          <span class="b g-w">&nbsp;</span> waiting in the client (lock, full connection) ·
+          <span class="b g-n">&nbsp;</span> network and I/O ·
+          <span class="b g-q">&nbsp;</span> queued (unread, work queue, outgoing queue, a lock) ·
+          <span class="b g-x">&nbsp;</span> executing ·
+          <span class="b g-c">&nbsp;</span> waiting for a callback</p>
+        <div class="resp" id="resp"></div>
+        <svg id="gantt" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Recent requests over time"></svg>
+      </div>
+
+      <div class="codes">
+        <div class="panel"><h2 id="codeCliHead">Client (Java)</h2><pre id="codeCli"></pre></div>
+        <div class="panel"><h2 id="codeSrvHead">Server dispatching (Java)</h2><pre id="codeSrv"></pre></div>
+      </div>
+
+      <div class="logbox" id="logBox">
+        <p class="loghead">Events around this tick</p>
+        <ol id="log"></ol>
+      </div>
+    </section>
+
+    <aside class="controls" id="side" aria-label="Status and display">
+      <div class="railhead"><span>Status and display</span><button id="pinSide" type="button" title="Keep this pane open (R)">Keep open</button></div>
+      <section class="card stats">
+        <h2>Current state<button type="button" class="infobtn" aria-expanded="false" aria-controls="tipStats" aria-label="About the current state">i</button></h2>
+        <p class="tip" id="tipStats" role="tooltip" hidden>At the step on screen. Server threads include the acceptor or main thread. Requests are counted when their reply arrives.</p>
+        <dl>
+          <div><dt>Tick</dt><dd id="stTick">0</dd></div>
+          <div><dt>Client 1 replies</dt><dd id="stC1">0</dd></div>
+          <div><dt>Client 2 replies</dt><dd id="stC2">0</dd></div>
+          <div><dt>Server threads</dt><dd id="stThr">0</dd></div>
+          <div><dt>Peak · created</dt><dd id="stPeak">0</dd></div>
+          <div><dt>Wrong replies</dt><dd id="stWrong">0</dd></div>
+        </dl>
+      </section>
+
+      <section class="card">
+        <h2>Save and share</h2>
+        <label for="saveNote">Note or question, saved in the file</label>
+        <textarea id="saveNote" rows="2" placeholder="e.g. Why does T2 get the reply to #7 at tick 23?"></textarea>
+        <div class="btnrow">
+          <button id="saveBtn" type="button">Save to file</button>
+          <button id="openBtn" type="button">Open file…</button>
+        </div>
+        <input type="file" id="openFile" accept=".json,application/json" hidden>
+        <p class="hint">The file holds the whole run and the step on screen, so whoever opens it can step back and forth from there. You can also drop a file onto the page.</p>
+        <p id="fileMsg" class="msg" role="status"></p>
+      </section>
+
+      <section class="card">
+        <h2>Display</h2>
+        <div class="field">
+          <label>Each step shows</label>
+          <div class="seg" role="group" aria-label="Step granularity">
+            <button id="byTick" type="button" aria-pressed="true">One tick</button>
+            <button id="byEvent" type="button" aria-pressed="false">One event</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="speed">Time per step <output id="speedOut">0.8 s</output></label>
+          <input type="range" id="speed" min="150" max="2500" step="50" value="800">
+        </div>
+        <div class="field">
+          <label for="zoom">Zoom <output id="zoomOut">100%</output></label>
+          <input type="range" id="zoom" min="50" max="200" step="10" value="100">
+        </div>
+        <p id="msg" class="msg" role="status"></p>
+      </section>
+    </aside>
+    <div class="railedge right" id="sideEdge" title="Status and display (R)" aria-hidden="true"></div>
+  </main>
+
+  <footer class="credit">
+    <span><a href="https://distributedum.github.io/ds/">Distributed Systems</a> · Universidade do Minho</span>
+    <span>Built with Claude, Anthropic's AI assistant.</span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  // ---------- dispatching core ----------
+  // Time advances in ticks. Each tick, messages whose latency has elapsed reach the receiver and wait there to be read, then
+  // every server thread acts, then every client thread. A thread does one thing per tick: read one message, write one
+  // message, or execute one tick of work. Adding to or taking from an in-memory queue is free.
+  const CBCOST = 2, RECON = 2, INF = 13;
+  const POOLED = { pool: 1, writer: 1, orb: 1 };
+  const WRITER = { writer: 1, orb: 1 };
+  const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const CL = c => `Client ${c + 1}`;
+  const Q = n => `<span class="b c${n % 8}">#${n}</span>`;
+  const R = n => `<span class="b c${n % 8} rep">↩${n}</span>`;
+  const K = n => `<span class="b c${n % 8} cbk">cb${n}</span>`;
+  const KR = n => `<span class="b c${n % 8} cbk rep">↩cb${n}</span>`;
+  const MSG = m => m.k === 'req' ? Q(m.n) : m.k === 'rep' ? R(m.n) : m.k === 'cb' ? K(m.n) : m.k === 'cbr' ? KR(m.n) : '<span class="b fin">FIN</span>';
+  const stubOf = P => P.server === 'orb' ? 'tag' : P.stub;
+  const ownRead = P => stubOf(P) === 'single' || stubOf(P) === 'lock';   // the sending thread reads its own reply
+  const nThreads = (P, c) => stubOf(P) === 'single' ? 1 : c ? P.thr2 : P.thr1;
+  const who = (P, cl, th) => stubOf(P) === 'single' ? CL(cl.c) : `${CL(cl.c)}'s ${th.name}`;
+  const sessionMax = P => P.server === 'orb' || P.session >= INF ? Infinity : P.session;
+  const cbProb = P => P.server !== 'orb' ? 0 : { none: 0, some: 1 / 3, all: 1 }[P.cb];
+  const opName = cost => cost <= 2 ? 'get' : cost <= 5 ? 'put' : 'scan';
+  const list = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1];
+
+  function rand(sim) { // mulberry32; the state lives in the simulation so a replay draws the same values
+    let a = sim.seed = (sim.seed + 0x6D2B79F5) | 0;
+    a = Math.imul(a ^ (a >>> 15), a | 1);
+    a ^= a + Math.imul(a ^ (a >>> 7), a | 61);
+    return ((a ^ (a >>> 14)) >>> 0) / 4294967296;
+  }
+  function costOf(sim, P, c) {
+    const r = rand(sim);
+    return P.exec === 'const' ? 3 : P.exec === 'uniform' ? 1 + Math.floor(r * 6) : P.exec === 'bimodal' ? (r < 0.75 ? 1 : 8) : (c === 0 ? 6 : 1);
+  }
+  function deep(x) {
+    if (Array.isArray(x)) return x.map(deep);
+    if (x && typeof x === 'object') { const o = {}; for (const k in x) o[k] = deep(x[k]); return o; }
+    return x;
+  }
+
+  function mkThread(id, name, role, x) {
+    return { id, name, role, st: 'idle', why: '', left: 0, conn: 0, job: null, out: null, done: 0, cbDone: false,
+      call: 0, msg: null, got: null, gotWrong: false, did: '', didT: -1, seq: 0, ...x };
+  }
+  function newSim(P, seed) {
+    const sim = { t: 0, seed, nCall: 0, nConn: 0, nSeq: 0, clients: [], conns: [],
+      srv: { threads: [], workq: [], spend: {} }, calls: {},
+      c: { done: [0, 0], wrong: 0, created: 0, peak: 0, cbs: 0, hand: 0 } };
+    for (let c = 0; c < 2; c++) {
+      const cl = { c, st: 'down', recon: 1, conn: 0, issued: 0, paused: false, lock: '', lockQ: [], pending: [], cbq: [], outq: [],
+        wlock: '', wq: [], wbusy: -1, threads: [], reader: null, cwr: null, workers: [] };
+      const n = nThreads(P, c);
+      for (let j = 0; j < n; j++) cl.threads.push(mkThread(`c${c}t${j}`, stubOf(P) === 'single' ? 'Main' : `T${j + 1}`, 'app', { st: 'think', left: Math.floor(rand(sim) * (P.think + 1)) }));
+      sim.clients.push(cl);
+    }
+    if (P.server === 'single') spawn(sim, mkThread('main', 'Main thread', 'main', { st: 'blocked', why: 'accept' }));
+    else spawn(sim, mkThread('acc', 'Acceptor', 'acc', { st: 'blocked', why: 'accept' }));
+    if (POOLED[P.server]) for (let i = 1; i <= P.pool; i++) spawn(sim, mkThread('W' + i, 'Worker ' + i, 'worker', { st: 'idle', why: 'work' }));
+    return sim;
+  }
+  function spawn(sim, th) {
+    th.seq = ++sim.nSeq; sim.srv.threads.push(th); sim.c.created++;
+    sim.c.peak = Math.max(sim.c.peak, sim.srv.threads.length);
+    return th;
+  }
+  function retire(sim, th) { sim.srv.threads = sim.srv.threads.filter(x => x.id !== th.id); }
+  const did = (sim, th, what) => { th.did = what; th.didT = sim.t; };
+  // in the symmetric design a client runs the same middleware as the server: reader, writer, work queue and pool
+  const runtime = cl => [cl.reader, cl.cwr, ...cl.workers].filter(Boolean);
+  const thName = (sim, id) => { const th = sim.srv.threads.find(x => x.id === id) || sim.clients.flatMap(cl => [...cl.threads, ...runtime(cl)]).find(x => x.id === id); return th ? th.name : id; };
+
+  // a connection is two pipes; an entry travels until its arrival tick, then waits at the far end to be read.
+  // A pipe holds at most P.cap messages in transit (travelling or unread): a writer blocks when it is full. Order is kept.
+  const connOf = (sim, id) => sim.conns.find(k => k.id === id);
+  const ready = (pipe, t) => pipe.length && pipe[0].arr <= t ? pipe[0].m : null;
+  const isFull = (pipe, P) => pipe.length >= P.cap;
+  function put(sim, P, pipe, m) {
+    const last = pipe.length ? pipe[pipe.length - 1].arr : 0;
+    pipe.push({ m, sent: sim.t, arr: Math.max(sim.t + P.lat, last) });
+  }
+  // several threads sharing one socket take a write lock, so their messages do not interleave. One write per tick;
+  // a thread blocked on a full connection keeps holding the lock. Waiters get it in FIFO order.
+  function write(sim, P, L, th, pipe, m, locked) {
+    if (locked && L.wlock !== th.id) {
+      if (L.wlock || L.wbusy === sim.t || (L.wq.length && L.wq[0] !== th.id)) { if (!L.wq.includes(th.id)) L.wq.push(th.id); return 'wlock'; }
+      L.wlock = th.id; L.wq = L.wq.filter(x => x !== th.id);
+    }
+    if (isFull(pipe, P)) return 'full';
+    put(sim, P, pipe, m);
+    if (locked) { L.wlock = ''; L.wbusy = sim.t; }
+    return 'ok';
+  }
+  // enter a blocked state, narrating only the transition
+  function block(th, why, e, kind, msg, hl, hb) {
+    const was = th.st === 'blocked' && th.why === why;
+    th.st = 'blocked'; th.why = why;
+    if (!was) e(kind, msg, hl, hb);
+  }
+
+  function arrivals(sim, P, e) {
+    const t = sim.t, srv = [], cli = [[], []], hb = [];
+    for (const k of sim.conns) {
+      for (const x of k.up) if (x.arr === t) {
+        srv.push(x.m); hb.push(x.m.id);
+        const call = sim.calls[x.m.call];
+        if (call && x.m.k === 'req') { call.ph = 'q'; call.tArr = t; }
+      }
+      for (const x of k.down) if (x.arr === t) {
+        cli[k.c].push(x.m); hb.push(x.m.id);
+        const call = sim.calls[x.m.call];
+        if (call && x.m.k === 'rep') call.ph = 'q';
+      }
+      if (k.tAvail === t && P.server === 'single') {
+        const main = sim.srv.threads[0], busy = main.conn && connOf(sim, main.conn);
+        if (busy) e('connect', `${CL(k.c)}'s connection reaches the server and waits in the accept queue: the main thread is busy serving ${CL(busy.c)} and will not call accept() until ${CL(busy.c)} disconnects.`, { [main.id]: 'bad' }, []);
+      }
+    }
+    const parts = [];
+    if (srv.length) parts.push(`${list(srv.map(MSG))} ${srv.length === 1 ? 'reaches' : 'reach'} the server, waiting to be read`);
+    cli.forEach((ms, c) => { if (ms.length) parts.push(`${list(ms.map(MSG))} ${ms.length === 1 ? 'reaches' : 'reach'} ${CL(c)}, waiting to be read`); });
+    if (parts.length) e('arrive', parts.join('; ') + '.', {}, hb);
+  }
+
+  const RANK = { main: 0, acc: 0, conn: 1, reader: 1, worker: 2, handler: 3, writer: 4 };
+  function serverPhase(sim, P, H, e) {
+    const order = sim.srv.threads.slice().sort((a, b) => RANK[a.role] - RANK[b.role] || a.seq - b.seq);
+    for (const th of order) {
+      if (!sim.srv.threads.includes(th)) continue;
+      if (th.role === 'main') mainStep(sim, P, H, e, th);
+      else if (th.role === 'acc') acceptOne(sim, P, H, e, th);
+      else if (th.role === 'conn') serve(sim, P, H, e, th, connOf(sim, th.conn));
+      else if (th.role === 'reader') readerStep(sim, P, H, e, th);
+      else if (th.role === 'worker') workerStep(sim, P, H, e, th);
+      else if (th.role === 'handler') handlerStep(sim, P, H, e, th);
+      else writerStep(sim, P, H, e, th);
+    }
+  }
+  const backlog = sim => sim.conns.filter(k => !k.accepted && k.tAvail <= sim.t).sort((a, b) => a.tAvail - b.tAvail || a.id - b.id);
+
+  function mainStep(sim, P, H, e, th) {
+    const k = th.conn && connOf(sim, th.conn);
+    if (k) { serve(sim, P, H, e, th, k); return; }
+    th.conn = 0;
+    acceptOne(sim, P, H, e, th);
+  }
+  function acceptOne(sim, P, H, e, th) {
+    const q = backlog(sim), k = q[0];
+    if (!k) { th.st = 'blocked'; th.why = 'accept'; return; }
+    k.accepted = true; k.tAcc = sim.t;
+    th.st = 'run'; th.why = ''; did(sim, th, 'accept');
+    const waited = sim.t - k.tAvail, wtxt = waited ? `, after ${pl(waited, 'tick')} in the accept queue` : '';
+    if (th.role === 'main') {
+      th.conn = k.id;
+      const other = sim.conns.find(x => x.c !== k.c);
+      e('accept', `The main thread's accept() returns ${CL(k.c)}'s connection${wtxt}. From now on it serves only this client, one request at a time, until it disconnects.${other ? ` ${CL(other.c)} must wait.` : ''}`, { [th.id]: 'ok' }, []);
+      return;
+    }
+    const mk = (pre, name, role) => spawn(sim, mkThread(pre + k.id, `C${k.c + 1} ${name}`, role,
+      { conn: k.id, st: role === 'writer' ? 'idle' : 'blocked', why: role === 'writer' ? 'work' : 'read' }));
+    let what;
+    if (P.server === 'conn') { mk('k', 'thread', 'conn'); what = 'a new thread for it, which will read, execute and answer all of its requests, one at a time'; }
+    else if (!WRITER[P.server]) { mk('r', 'reader', 'reader'); what = `a reader thread for it, which will ${P.server === 'req' ? 'start a new thread for each request' : 'put each request in the shared work queue'}`; }
+    else { mk('r', 'reader', 'reader'); mk('w', 'writer', 'writer'); what = 'a reader thread and a writer thread for it'; }
+    e('accept', `The acceptor's accept() returns ${CL(k.c)}'s connection${wtxt ? wtxt + ',' : ''} and starts ${what}.`, { [th.id]: 'ok' }, []);
+  }
+
+  // the main thread (single) and a connection's own thread (thread per connection): read, execute, write, repeat
+  function serve(sim, P, H, e, th, k) {
+    const t = sim.t;
+    if (th.out) {
+      const m = th.out;
+      if (write(sim, P, k, th, k.down, m, false) === 'ok') {
+        th.out = null; th.st = 'run'; th.why = ''; did(sim, th, 'wrote'); sentReply(sim, m);
+        e('reply', `${th.name} writes the reply ${R(m.n)} to ${CL(k.c)}'s connection and goes back to read() the next request.`, { [th.id]: 'ok' }, [m.id]);
+      } else block(th, 'full', e, 'full', `${th.name} cannot write ${R(m.n)}: the connection to ${CL(k.c)} is full (${pl(P.cap, 'message')} in transit, unread) because ${CL(k.c)} is not reading. write() blocks${th.role === 'main' ? ', and with it the whole server' : ''}.`, { [th.id]: 'bad' }, [m.id]);
+      return;
+    }
+    if (th.job) { exec(sim, P, H, e, th); return; }
+    const m = ready(k.up, t);
+    if (!m) { th.st = 'blocked'; th.why = 'read'; return; }
+    k.up.shift(); th.st = 'run'; th.why = '';
+    if (m.k === 'fin') {
+      did(sim, th, 'eof'); closeConn(sim, k);
+      if (th.role === 'main') {
+        th.conn = 0;
+        const q = backlog(sim);
+        e('eof', `read() reaches the end of ${CL(k.c)}'s stream: it disconnected. The main thread closes the socket and goes back to accept()${q.length ? `, where ${CL(q[0].c)} has been waiting since tick ${q[0].tAvail}` : ''}.`, { [th.id]: 'split' }, [m.id]);
+      } else {
+        retire(sim, th);
+        e('eof', `${th.name} reads the end of the stream: ${CL(k.c)} disconnected. It closes the socket and the thread ends.`, {}, [m.id]);
+      }
+      return;
+    }
+    th.job = m; th.done = 0; th.cbDone = false; did(sim, th, 'read'); gotRequest(sim, m, 'x');
+    const behind = k.up.filter(x => x.arr <= t).length;
+    e('read', `${th.name} reads request ${Q(m.n)} (${m.op}, ${pl(m.cost, 'tick')} of work) and handles it itself${behind ? `. ${pl(behind, 'more request')} from ${CL(k.c)} ${behind === 1 ? 'waits' : 'wait'} behind it, unread` : ''}.`, { [th.id]: 'ok' }, [m.id]);
+  }
+  function gotRequest(sim, m, ph) {
+    const call = sim.calls[m.call];
+    if (call) { call.io = sim.t; call.tRecv = sim.t; call.ph = ph; }
+  }
+  function sentReply(sim, m) {
+    const call = sim.calls[m.call];
+    if (call && m.k === 'rep') { call.io = sim.t; call.ph = 'n'; call.tReply = sim.t; }
+  }
+  function closeConn(sim, k) { sim.conns = sim.conns.filter(x => x.id !== k.id); }
+
+  // one tick of a request's work; in the symmetric design, the handler sends a client a callback halfway through
+  function exec(sim, P, H, e, th) {
+    const m = th.job, call = sim.calls[m.call], t = sim.t;
+    if (th.st === 'blocked' && th.why === 'cb') return;
+    if (m.cb && !th.cbDone && th.done >= Math.floor(m.cost / 2)) { callback(sim, P, e, th, m); return; }
+    th.done++; th.st = 'run'; th.why = ''; did(sim, th, 'exec');
+    if (call) { call.ex = t; if (!call.tStart) { call.tStart = t; call.by = th.name; } }
+    if (th.done < m.cost) return;
+    th.job = null; did(sim, th, 'finished');
+    const rep = { id: 'p' + m.call, k: 'rep', call: m.call, n: m.n, conn: m.conn, c: m.c };
+    if (call) { call.tEnd = t; call.ph = 'q'; }
+    if (WRITER[P.server]) {
+      const k = connOf(sim, m.conn);
+      if (k) k.outq.push(rep);
+      th.st = 'idle'; th.why = 'work';
+      e('done', `${th.name} finishes ${Q(m.n)} and adds the reply ${R(m.n)} to ${CL(m.c)}'s outgoing queue${k && k.outq.length > 1 ? ` (${k.outq.length} waiting)` : ''}, for the writer thread. It never touches the connection, so it can never block on it.`, { [th.id]: 'ok' }, [rep.id]);
+    } else {
+      th.out = rep;
+      e('done', `${th.name} finishes executing ${Q(m.n)}; it writes the reply ${R(m.n)} in the next tick.`, { [th.id]: 'ok' }, [rep.id]);
+    }
+  }
+  function callback(sim, P, e, th, m) {
+    const call = sim.calls[m.call], target = P.cbTo === 'caller' ? m.c : 1 - m.c;
+    const k = sim.conns.find(x => x.c === target && x.accepted && !x.eof);
+    th.cbDone = true;
+    const when = th.done ? `After ${th.done} of ${pl(m.cost, 'tick')} of ${Q(m.n)}` : `Before executing ${Q(m.n)}`;
+    if (!k) { e('callback', `${when}, the handler would send a callback to ${CL(target)}, but ${CL(target)} has no open connection, so it skips the callback.`, { [th.id]: 'split' }, []); return; }
+    const cb = { id: 'k' + m.call, k: 'cb', call: m.call, n: m.n, conn: k.id, c: target };
+    k.outq.push(cb); sim.srv.spend[m.call] = th.id; sim.c.cbs++;
+    if (call) { call.ph = 'c'; call.tCb = sim.t; }
+    th.st = 'blocked'; th.why = 'cb'; did(sim, th, 'callback');
+    e('callback', `${when}, the handler sends a request of its own to ${CL(target)}${target === m.c ? ' (the client that sent ' + Q(m.n) + ')' : ''}: a callback, ${K(m.n)}. It goes into the outgoing queue of ${CL(target)}'s connection, next to the replies, and ${th.name} waits for its result.`, { [th.id]: 'split' }, [cb.id]);
+  }
+
+  function readerStep(sim, P, H, e, th) {
+    const k = connOf(sim, th.conn), t = sim.t, m = k && ready(k.up, t);
+    if (!m) { th.st = 'blocked'; th.why = 'read'; return; }
+    k.up.shift(); th.st = 'run'; th.why = ''; did(sim, th, 'read');
+    if (m.k === 'fin') {
+      k.eof = true; retire(sim, th);
+      if (WRITER[P.server]) e('eof', `${th.name} reads the end of the stream: ${CL(k.c)} disconnected. The reader ends; the writer closes the socket once its queue is empty.`, {}, [m.id]);
+      else { closeConn(sim, k); e('eof', `${th.name} reads the end of the stream: ${CL(k.c)} disconnected. It closes the socket and ends.`, {}, [m.id]); }
+      return;
+    }
+    if (m.k === 'cbr') {
+      const wid = sim.srv.spend[m.call], w = sim.srv.threads.find(x => x.id === wid);
+      delete sim.srv.spend[m.call];
+      if (w) { w.st = 'run'; w.why = ''; }
+      const call = sim.calls[m.call];
+      if (call) call.ph = 'x';
+      e('cbret', `${th.name} reads ${KR(m.n)}: not a request but the result of a callback. Like a client, the server looks up id ${m.n} in its own pending table and wakes ${w ? w.name : 'the handler'}, which goes on with ${Q(m.n)}.`, { [th.id]: 'ok', [wid]: 'ok' }, [m.id]);
+      return;
+    }
+    if (P.server === 'req') {
+      gotRequest(sim, m, 'x');
+      sim.c.hand++;
+      const h = spawn(sim, mkThread('h' + m.call, `Handler #${m.n}`, 'handler', { conn: k.id, job: m, st: 'run' }));
+      e('spawn', `${th.name} reads ${Q(m.n)} (${m.op}, ${pl(m.cost, 'tick')}) and starts a new thread for it, ${h.name}, which begins in the next tick. Server threads alive: ${sim.srv.threads.length}.`, { [th.id]: 'ok', [h.id]: 'split' }, [m.id]);
+      return;
+    }
+    gotRequest(sim, m, 'q');
+    sim.srv.workq.push(m);
+    const idle = sim.srv.threads.filter(x => x.role === 'worker' && !x.job && !x.out).length;
+    e('enqueue', `${th.name} reads ${Q(m.n)} (${m.op}, ${pl(m.cost, 'tick')}) and puts it in the shared work queue${idle >= sim.srv.workq.length ? ', where an idle worker takes it at once' : `: every worker is busy, so it waits (${sim.srv.workq.length} in the queue)`}.`, { [th.id]: 'ok' }, [m.id]);
+  }
+
+  function workerStep(sim, P, H, e, th) {
+    if (th.out) { writeLocked(sim, P, e, th); return; }
+    if (th.job) { exec(sim, P, H, e, th); return; }
+    const m = sim.srv.workq.shift();
+    if (!m) { th.st = 'idle'; th.why = 'work'; return; }
+    th.job = m; th.done = 0; th.cbDone = false;
+    const call = sim.calls[m.call], waited = call && call.tRecv ? sim.t - call.tRecv : 0;
+    e('take', `${th.name} takes ${Q(m.n)} from the work queue${waited ? `, where it waited ${pl(waited, 'tick')},` : ''} and starts executing it.`, { [th.id]: 'ok' }, [m.id]);
+    exec(sim, P, H, e, th);
+  }
+  function handlerStep(sim, P, H, e, th) {
+    if (th.out) { if (writeLocked(sim, P, e, th) === 'ok') retire(sim, th); return; }
+    exec(sim, P, H, e, th);
+  }
+  // pool workers and per-request threads share the connection's socket, so they write under its lock
+  function writeLocked(sim, P, e, th) {
+    const m = th.out, k = connOf(sim, m.conn);
+    if (!k) { th.out = null; return 'ok'; }
+    const r = write(sim, P, k, th, k.down, m, true);
+    if (r === 'ok') {
+      th.out = null; th.st = th.role === 'worker' ? 'idle' : 'run'; th.why = th.role === 'worker' ? 'work' : ''; did(sim, th, 'wrote'); sentReply(sim, m);
+      e('reply', `${th.name} takes ${CL(k.c)}'s write lock, writes ${R(m.n)} and releases the lock${th.role === 'handler' ? '. Its job done, the thread ends' : ''}.`, { [th.id]: 'ok' }, [m.id]);
+    } else if (r === 'wlock') {
+      const holder = k.wlock ? `${thName(sim, k.wlock)} holds ${CL(k.c)}'s write lock (it is blocked writing)` : `another thread is writing to ${CL(k.c)}'s connection this tick`;
+      block(th, 'wlock', e, 'wlock', `${th.name} wants to write ${R(m.n)}, but ${holder}. Replies on one connection must not interleave, so it waits for the lock.`, { [th.id]: 'bad' }, [m.id]);
+    } else {
+      block(th, 'full', e, 'full', `${th.name} holds ${CL(k.c)}'s write lock, but the connection to ${CL(k.c)} is full (${pl(P.cap, 'message')} in transit, unread): ${CL(k.c)} is not reading. write() blocks, and ${th.role === 'worker' ? 'the pool loses this worker' : 'the thread is stuck'} until there is room.`, { [th.id]: 'bad' }, [m.id]);
+    }
+    return r;
+  }
+  function writerStep(sim, P, H, e, th) {
+    const k = connOf(sim, th.conn);
+    if (k.outq.length) {
+      const m = k.outq[0];
+      if (isFull(k.down, P)) {
+        block(th, 'full', e, 'full', `${th.name} cannot write ${MSG(m)}: the connection to ${CL(k.c)} is full, because ${CL(k.c)} is not reading. Only this writer blocks: the workers keep serving other clients, and ${CL(k.c)}'s messages wait in its outgoing queue.`, { [th.id]: 'bad' }, [m.id]);
+        return;
+      }
+      k.outq.shift(); put(sim, P, k.down, m); sentReply(sim, m);
+      th.st = 'run'; th.why = ''; did(sim, th, 'wrote');
+      e('reply', `${th.name} writes ${MSG(m)} to the connection${m.k === 'cb' ? ' (a callback request leaves exactly like a reply)' : ''}${k.outq.length ? `; ${k.outq.length} more queued` : ''}. No lock is needed: it is the only thread that writes to this connection.`, { [th.id]: 'ok' }, [m.id]);
+      return;
+    }
+    if (k.eof) { closeConn(sim, k); retire(sim, th); e('eof', `${th.name} finds its queue empty after the end of the stream: it closes ${CL(k.c)}'s socket and ends.`, {}, []); return; }
+    th.st = 'idle'; th.why = 'work';
+  }
+
+  function clientPhase(sim, P, H, e, cl) {
+    const t = sim.t, paused = cl.c ? P.pause2 : P.pause1;
+    if (paused) {
+      if (!cl.paused) { cl.paused = true; e('pause', `${CL(cl.c)} is paused (think of a long GC pause or a breakpoint): none of its threads runs, so nothing reads its connection.`, { ['C' + cl.c]: 'split' }, []); }
+      return;
+    }
+    if (cl.paused) { cl.paused = false; e('resume', `${CL(cl.c)} resumes.`, { ['C' + cl.c]: 'ok' }, []); }
+    if (cl.st === 'down') { if (t >= cl.recon && !sim.conns.some(k => k.c === cl.c)) connect(sim, P, e, cl); }
+    else maybeClose(sim, P, e, cl);
+    if (cl.reader) readerClient(sim, P, H, e, cl, cl.reader);
+    for (const th of cl.workers) clientWorker(sim, P, e, cl, th);
+    for (const th of cl.threads) appStep(sim, P, H, e, cl, th);
+    if (cl.cwr) clientWriter(sim, P, e, cl, cl.cwr);
+  }
+  function connect(sim, P, e, cl) {
+    const k = { id: ++sim.nConn, c: cl.c, up: [], down: [], tAvail: sim.t + P.lat, tAcc: 0, accepted: false, eof: false, outq: [], wlock: '', wq: [], wbusy: -1 };
+    sim.conns.push(k); cl.conn = k.id; cl.st = 'up'; cl.issued = 0;
+    if (!ownRead(P)) cl.reader = mkThread(`c${cl.c}r`, 'Reader', 'creader', { st: 'blocked', why: 'read' });
+    if (P.server === 'orb') {
+      cl.cwr = mkThread(`c${cl.c}w`, 'Writer', 'cwriter', { st: 'idle', why: 'work' });
+      cl.workers = P.cbIn === 'pool' ? Array.from({ length: P.cbPool }, (_, i) => mkThread(`c${cl.c}k${i + 1}`, `Worker ${i + 1}`, 'cworker', { st: 'idle', why: 'work' })) : [];
+    }
+    for (const th of cl.threads) if (th.st === 'idle') { th.st = 'think'; th.left = 0; th.why = ''; }
+    e('connect', `${CL(cl.c)} connects to the server${k.id > 2 ? ' again' : ''} (connection ${k.id})${P.server === 'orb' ? ` and starts its middleware: a reader, a writer${cl.workers.length ? ` and ${pl(cl.workers.length, 'worker')}` : ''}, as the server has` : !ownRead(P) ? ' and starts its reader thread' : ''}. The connection reaches the server's accept queue at tick ${k.tAvail}; requests can be sent before it is accepted, and wait in the network, unread.`, { ['C' + cl.c]: 'split' }, []);
+  }
+  function maybeClose(sim, P, e, cl) {
+    if (cl.issued < sessionMax(P)) return;
+    if (cl.threads.some(x => x.call) || cl.pending.length || cl.cbq.length || cl.outq.length || runtime(cl).some(x => x.job)) return;
+    const k = connOf(sim, cl.conn);
+    put(sim, P, k.up, { id: 'f' + k.id, k: 'fin', call: 0, n: 0, conn: k.id });
+    cl.conn = 0; cl.st = 'down'; cl.recon = sim.t + RECON; cl.reader = null; cl.cwr = null; cl.workers = [];
+    for (const th of cl.threads) { th.st = 'idle'; th.why = 'conn'; }
+    e('close', `${CL(cl.c)} has made its ${pl(sessionMax(P), 'request')} on this connection, so it calls close(): a FIN (end of stream) travels to the server. It reconnects in ${pl(RECON, 'tick')}, once the server has closed its side.`, { ['C' + cl.c]: 'split' }, ['f' + k.id]);
+  }
+
+  function appStep(sim, P, H, e, cl, th) {
+    const t = sim.t;
+    if (th.didT === t) return;   // it already got a reply this tick
+    if (th.st === 'think') { if (th.left > 0) { th.left--; return; } startCall(sim, P, e, cl, th); return; }
+    if (th.st === 'idle') { if (cl.st === 'up' && cl.issued < sessionMax(P)) startCall(sim, P, e, cl, th); return; }
+    if (th.st !== 'blocked') return;
+    if (th.why === 'lock') {
+      if (cl.lock || cl.lockQ[0] !== th.id) return;
+      cl.lockQ.shift(); cl.lock = th.id;
+      const call = sim.calls[th.call], o = sendReq(sim, P, cl, th);
+      e(o.kind, `${th.name} finally gets the connection's lock, after ${pl(t - call.tCall, 'tick')}. ${o.text}`, { [th.id]: o.kind === 'send' ? 'ok' : 'bad' }, [th.msg ? th.msg.id : 'q' + th.call]);
+      return;
+    }
+    if (th.why === 'wlock' || th.why === 'full') {
+      const id = th.msg.id, o = sendReq(sim, P, cl, th);
+      if (!o.quiet) e(o.kind, o.kind === 'send' ? `${th.name} can write at last. ${o.text}` : o.text, { [th.id]: o.kind === 'send' ? 'ok' : 'bad' }, [id]);
+      return;
+    }
+    if (th.why === 'reply' && ownRead(P)) {
+      const k = connOf(sim, cl.conn), m = k && ready(k.down, t);
+      if (!m) return;
+      k.down.shift();
+      const call = complete(sim, P, H, cl, th, m);
+      const next = cl.lockQ[0] && cl.threads.find(x => x.id === cl.lockQ[0]);
+      e('deliver', `${who(P, cl, th)} reads its own reply ${R(m.n)}, ${pl(call.trace.length, 'tick')} after sending ${Q(call.id)}.${stubOf(P) === 'lock' ? ` It releases the lock${next ? `, which ${next.name} has been waiting for` : ''}.` : ''}`, { [th.id]: 'ok' }, [m.id]);
+    }
+  }
+  function startCall(sim, P, e, cl, th) {
+    if (cl.st !== 'up' || cl.issued >= sessionMax(P)) { th.st = 'idle'; th.why = cl.st === 'up' ? 'session' : 'conn'; return; }
+    const id = ++sim.nCall, cost = costOf(sim, P, cl.c), cb = rand(sim) < cbProb(P);
+    const m = { id: 'q' + id, k: 'req', call: id, n: id, conn: cl.conn, c: cl.c, cost, op: opName(cost), cb };
+    sim.calls[id] = { id, c: cl.c, thr: th.name, op: m.op, cost, cb, tCall: sim.t, trace: '', ph: 'w', io: -1, ex: -1, wrong: false, got: 0, by: '' };
+    th.call = id; th.msg = m; th.got = null; th.gotWrong = false; cl.issued++;
+    const head = `${who(P, cl, th)} sends a ${m.op} request, ${Q(id)}, with ${pl(cost, 'tick')} of work for the server${cb ? ' and a callback' : ''}.`;
+    if (ownRead(P)) {
+      if (!cl.lock && !cl.lockQ.length) {
+        cl.lock = th.id;
+        const o = sendReq(sim, P, cl, th);
+        e(o.kind, `${head} ${stubOf(P) === 'lock' ? 'The connection\'s lock is free, so it takes it. ' : ''}${o.text}`, { [th.id]: 'ok' }, [m.id]);
+      } else {
+        const holder = cl.threads.find(x => x.id === cl.lock), ahead = cl.lockQ.map(id2 => cl.threads.find(x => x.id === id2).name);
+        cl.lockQ.push(th.id); th.st = 'blocked'; th.why = 'lock';
+        e('lock', `${head} But the connection allows one pending request: ${holder ? `${holder.name} holds its lock until it reads ${R(holder.call)}` : 'its lock is taken'}, so ${th.name} blocks${ahead.length ? `, behind ${list(ahead)}` : ''}.`, { [th.id]: 'bad' }, [m.id]);
+      }
+      return;
+    }
+    const o = sendReq(sim, P, cl, th);
+    e(o.kind, `${head} ${o.text}`, { [th.id]: o.kind === 'send' ? 'ok' : 'bad' }, [m.id]);
+  }
+  function sendReq(sim, P, cl, th) {
+    const k = connOf(sim, cl.conn), m = th.msg, stub = stubOf(P), call = sim.calls[m.call];
+    if (P.server === 'orb') {   // like a server worker: hand the message to the middleware, never touch the connection
+      cl.pending.push({ call: m.call, tid: th.id }); cl.outq.push(m);
+      th.msg = null; th.st = 'blocked'; th.why = 'reply'; did(sim, th, 'sent');
+      call.ph = 'q';
+      return { kind: 'send', text: `It records ${Q(m.n)} in the pending table under id ${m.n}, adds it to the outgoing queue for the writer thread, and waits, just as a server worker does when it sends a callback.` };
+    }
+    const r = write(sim, P, cl, th, k.up, m, !ownRead(P));
+    if (r === 'ok') {
+      th.msg = null; th.st = 'blocked'; th.why = 'reply'; did(sim, th, 'sent');
+      call.io = sim.t; call.ph = 'n'; call.tSent = sim.t;
+      if (!ownRead(P)) cl.pending.push({ call: m.call, tid: th.id });
+      return { kind: 'send', text: stub === 'single'
+        ? 'It writes the request to the connection and blocks reading the reply.'
+        : stub === 'lock'
+        ? `It writes ${Q(m.n)} to the connection and, still holding the lock, waits to read the reply itself.`
+        : `Under the write lock it adds ${Q(m.n)} to the pending ${stub === 'fifo' ? 'queue (replies are expected in this order)' : `table, under id ${m.n}`}, writes it to the connection, and waits for the reader thread to hand it the reply.` };
+    }
+    const quiet = th.st === 'blocked' && th.why === r;
+    th.st = 'blocked'; th.why = r;
+    return { kind: r === 'full' ? 'full' : 'wlock', quiet, text: r === 'full'
+      ? `The connection to the server is full (${pl(P.cap, 'message')} in transit, unread): the server is not reading it, so ${th.name}'s write() blocks.`
+      : `${th.name} must wait for the write lock: another thread is writing to the connection.` };
+  }
+  function complete(sim, P, H, cl, th, m) {
+    const call = sim.calls[th.call];
+    call.trace += 'n'; call.tDone = sim.t; call.got = m.n; call.wrong = m.call !== call.id;
+    delete sim.calls[call.id];
+    H.done.push(call);
+    sim.c.done[cl.c]++;
+    if (call.wrong) sim.c.wrong++;
+    th.call = 0; th.got = m; th.gotWrong = call.wrong; th.st = 'think'; th.left = P.think; th.why = ''; did(sim, th, 'returned');
+    if (ownRead(P)) cl.lock = '';
+    return call;
+  }
+
+  // the client's reader thread: hands replies to waiting threads and, in the symmetric design, dispatches callbacks
+  function readerClient(sim, P, H, e, cl, th) {
+    const t = sim.t, k = connOf(sim, cl.conn);
+    if (th.job) { runCallback(sim, P, e, cl, th); return; }
+    const m = ready(k.down, t);
+    if (!m) { th.st = 'blocked'; th.why = 'read'; return; }
+    k.down.shift(); th.st = 'run'; th.why = ''; did(sim, th, 'read');
+    if (m.k === 'cb') {
+      if (cl.workers.length) {
+        cl.cbq.push(m);
+        e('cbin', `${CL(cl.c)}'s reader reads ${K(m.n)}: not a reply but a request from the server. It puts it in the client's work queue, exactly as the server's reader does with requests, and goes straight back to reading.`, { [th.id]: 'ok' }, [m.id]);
+      } else {
+        th.job = m; th.done = 0;
+        e('cbin', `${CL(cl.c)}'s reader reads ${K(m.n)}, a callback request, and handles it itself. For the next ${pl(CBCOST + 1, 'tick')} nobody reads this connection, so replies for ${CL(cl.c)}'s threads wait in the network.`, { [th.id]: 'split' }, [m.id]);
+      }
+      return;
+    }
+    const fifo = stubOf(P) === 'fifo', idx = fifo ? 0 : cl.pending.findIndex(p => p.call === m.call);
+    if (idx < 0 || !cl.pending.length) { e('info', `${CL(cl.c)}'s reader reads ${R(m.n)}, but no thread is waiting for it, so it is dropped.`, {}, [m.id]); return; }
+    const p = cl.pending.splice(idx, 1)[0], waiter = cl.threads.find(x => x.id === p.tid);
+    const call = complete(sim, P, H, cl, waiter, m);
+    if (!call.wrong) {
+      e('deliver', `${CL(cl.c)}'s reader reads ${R(m.n)}${fifo ? ` and gives it to the oldest pending request, ${Q(p.call)} of ${waiter.name}: they match` : `, finds id ${m.n} in the pending table and hands the reply to ${waiter.name}`}, ${pl(call.trace.length, 'tick')} after ${waiter.name} sent its request.`, { [th.id]: 'ok', [waiter.id]: 'ok' }, [m.id]);
+    } else {
+      const other = sim.calls[m.call];
+      if (other) other.ph = 'q';
+      e('wrong', `${CL(cl.c)}'s reader reads ${R(m.n)} and gives it to the oldest pending request, ${Q(p.call)} of ${waiter.name}. But ${R(m.n)} answers ${Q(m.n)}: the server replied out of order and, with no id to match on, ${waiter.name} gets the wrong reply!`, { [th.id]: 'bad', [waiter.id]: 'bad' }, [m.id]);
+    }
+  }
+  // a client worker: takes a callback from the client's work queue, as a server worker takes a request
+  function clientWorker(sim, P, e, cl, th) {
+    if (th.job) { runCallback(sim, P, e, cl, th); return; }
+    const m = cl.cbq.shift();
+    if (!m) { th.st = 'idle'; th.why = 'work'; return; }
+    th.job = m; th.done = 0;
+    e('cbrun', `${CL(cl.c)}'s ${th.name} takes ${K(m.n)} from the client's work queue and handles it (${pl(CBCOST, 'tick')}), as a server worker handles a request.`, { [th.id]: 'split' }, [m.id]);
+    runCallback(sim, P, e, cl, th);
+  }
+  // one tick of handling a callback; its reply then goes to the outgoing queue, like any reply
+  function runCallback(sim, P, e, cl, th) {
+    th.done++; th.st = 'run'; th.why = ''; did(sim, th, 'callback');
+    if (th.done < CBCOST) return;
+    const m = { id: 'a' + th.job.call, k: 'cbr', call: th.job.call, n: th.job.n, conn: cl.conn };
+    th.job = null; cl.outq.push(m);
+    if (th.role === 'cworker') { th.st = 'idle'; th.why = 'work'; }
+    e('cbreply', `${CL(cl.c)}'s ${th.role === 'cworker' ? th.name : 'reader'} finishes ${K(m.n)} and adds its reply ${KR(m.n)} to the outgoing queue, for the writer thread.`, { [th.id]: 'ok' }, [m.id]);
+  }
+  // the client's writer: the only thread that writes to its connection, as on the server
+  function clientWriter(sim, P, e, cl, th) {
+    const k = connOf(sim, cl.conn);
+    if (!cl.outq.length) { th.st = 'idle'; th.why = 'work'; return; }
+    const m = cl.outq[0];
+    if (isFull(k.up, P)) {
+      block(th, 'full', e, 'full', `${CL(cl.c)}'s writer cannot write ${MSG(m)}: the connection to the server is full. Only the writer waits; ${CL(cl.c)}'s other threads keep running.`, { [th.id]: 'bad' }, [m.id]);
+      return;
+    }
+    cl.outq.shift(); put(sim, P, k.up, m);
+    th.st = 'run'; th.why = ''; did(sim, th, 'wrote');
+    const call = m.k === 'req' && sim.calls[m.call];
+    if (call) { call.io = sim.t; call.ph = 'n'; call.tSent = sim.t; }
+    e(m.k === 'req' ? 'send' : 'cbreply', `${CL(cl.c)}'s writer writes ${MSG(m)} to the connection${cl.outq.length ? `; ${cl.outq.length} more queued` : ''}, exactly as the server's writer does.`, { [th.id]: 'ok' }, [m.id]);
+  }
+
+  function tick(sim, P, H, ev) {
+    const t = ++sim.t;
+    let n = 0;
+    const e = (...a) => { n++; ev(...a); };
+    arrivals(sim, P, e);
+    serverPhase(sim, P, H, e);
+    for (const cl of sim.clients) clientPhase(sim, P, H, e, cl);
+    for (const id in sim.calls) { const k = sim.calls[id]; k.trace += k.ex === t ? 'x' : k.io === t ? 'n' : k.ph; }
+    if (!n) e('tick', quiet(sim), {}, []);
+  }
+  function quiet(sim) {
+    const ex = sim.srv.threads.filter(x => x.job && x.didT === sim.t).map(x => `${x.name} on ${Q(x.job.n)} (${x.done} of ${x.job.cost})`);
+    const cb = sim.clients.flatMap(cl => runtime(cl).filter(x => x.job && x.didT === sim.t).map(x => `${CL(cl.c)} on ${K(x.job.n)}`));
+    const parts = [];
+    if (ex.length) parts.push(`Executing: ${list(ex)}.`);
+    if (cb.length) parts.push(`Running a callback: ${list(cb)}.`);
+    return `No message moves this tick. ${parts.join(' ') || 'Every thread is thinking, waiting or blocked.'}`;
+  }
+  // ---------- operations ----------
+
+  const PRESETS = {
+    single: { P: { server: 'single', stub: 'single', session: 4, exec: 'const', think: 2 }, ticks: 30,
+      text: 'Single-threaded server and single-threaded clients: the server accepts Client 1 and serves only that client, one request at a time, until it disconnects after 4 requests. Meanwhile Client 2\'s connection waits in the accept queue and its first request waits in the network, unread.' },
+    lock: { P: { server: 'conn', stub: 'lock', thr1: 3, thr2: 1, exec: 'uniform', think: 1 }, ticks: 30,
+      text: 'One pending request per connection, over a thread-per-connection server: Client 1 has 3 threads but only one request in transit at a time, so its threads queue on the connection\'s lock (amber in the timeline below) while the network and the server sit mostly idle.' },
+    hol: { P: { server: 'conn', stub: 'tag', thr1: 3, thr2: 1, exec: 'bimodal', think: 1 }, ticks: 34,
+      text: 'Several pending requests per connection, over a thread-per-connection server: Client 1\'s connection thread handles its requests one at a time, so quick get requests wait behind a slow scan (head-of-line blocking, red in the timeline).' },
+    wrong: { P: { server: 'req', stub: 'fifo', thr1: 3, thr2: 2, exec: 'uniform', think: 1 }, ticks: 40,
+      text: 'Thread per request, and clients that match replies to pending requests in order: requests run concurrently, quick ones finish first, so replies come back out of order and some threads get the wrong reply (red). Switch the clients to the pending table to fix it.' },
+    stall: { P: { server: 'pool', stub: 'tag', pool: 2, thr1: 3, thr2: 2, exec: 'const', think: 1, cap: 1 }, ticks: 16, then: { pause1: true },
+      text: 'Thread pool whose workers write replies themselves. Client 1 has just been paused, so it stops reading: its connection fills up, a worker blocks inside write() holding the write lock, the next one blocks on the lock, and soon no worker is left for Client 2. Press ▶.' },
+    writer: { P: { server: 'writer', stub: 'tag', pool: 2, thr1: 3, thr2: 2, exec: 'const', think: 1, cap: 1 }, ticks: 16, then: { pause1: true },
+      text: 'The same, with a writer thread per connection. Client 1 has just been paused: only its writer blocks, its replies pile up in the outgoing queue, and the workers keep serving Client 2. Press ▶.' },
+    orb: { P: { server: 'orb', stub: 'tag', pool: 2, thr1: 2, thr2: 2, exec: 'uniform', think: 2, cb: 'all', cbTo: 'other', cbIn: 'pool', cbPool: 2 }, ticks: 30,
+      text: 'Symmetric (ORB): every handler sends a request of its own to the other client (a callback, as in a chat). Each client now runs the same middleware as the server: its reader puts requests in a work queue served by a pool, every message leaves through an outgoing queue and a writer, and a thread waiting for a reply sits in a pending table, whether it is a client thread or a server worker. Both ends export a service and consume the other\'s.' },
+    orbrd: { P: { server: 'orb', stub: 'tag', pool: 2, thr1: 2, thr2: 2, exec: 'uniform', think: 2, cb: 'all', cbTo: 'caller', cbIn: 'reader' }, ticks: 30,
+      text: 'Callbacks handled in the client\'s reader thread, with no pool on the client: while it handles one, nobody reads the connection, so replies for the other threads wait in the network, and the server\'s worker waits too.' }
+  };
+  const P0 = { server: 'single', stub: 'single', thr1: 2, thr2: 2, pool: 2, exec: 'uniform', think: 2, session: INF, lat: 2, cap: 2,
+    cb: 'all', cbTo: 'other', cbIn: 'pool', cbPool: 2, pause1: false, pause2: false };
+  const SEED = 20261024, MAXSTEPS = 40000;
+  const S = { by: 'tick', speed: 800, zoom: 1 };
+
+  let P = P0, sim, TL, cur = 0, playing = false, timer = 0, rafId = 0, shown = null, undoStack = [];
+
+  // besides the recorded steps, a timeline keeps its recipe (seed, starting parameters, every change and the tick it
+  // was applied at), which is all a saved file needs: the simulation is deterministic, so replaying it rebuilds every step
+  function newTimeline(p, seed) { return { steps: [], H: { done: [] }, base: p, seed, ops: [] }; }
+  function recorder(kind, msg, hl = {}, hb = []) {
+    TL.steps.push({ t: sim.t, kind, msg, hl, hb, sim: deep(sim), P, nD: TL.H.done.length });
+  }
+  function simTick() {
+    tick(sim, P, TL.H, recorder);
+    // the last snapshot of a tick carries the final state (silent countdowns and traces included)
+    TL.steps[TL.steps.length - 1].sim = deep(sim);
+  }
+  function tickEnd(i) { const t = TL.steps[i].t; while (i + 1 < TL.steps.length && TL.steps[i + 1].t === t) i++; return i; }
+  function tickStart(i) { const t = TL.steps[i].t; while (i > 0 && TL.steps[i - 1].t === t) i--; return i; }
+
+  const OPEN_MSG = 'Two client processes and a server, before anyone connects. Each client thread loops: think, then send a request and wait for its reply.';
+  function startRun(p, ticks, note, seed = SEED, then) {
+    P = p; sim = newSim(P, seed); TL = newTimeline(p, seed);
+    recorder('info', OPEN_MSG);
+    for (let i = 0; i < ticks; i++) simTick();
+    if (note) applyOp({ t: sim.t, P: then ? { ...P, ...then } : P, msg: note });
+    cur = TL.steps.length - 1;
+  }
+  // a change applied at the end of tick op.t: new parameters
+  function applyOp(op) {
+    P = op.P;
+    recorder('change', op.msg);
+    TL.ops.push(op);
+  }
+  function pushUndo() { undoStack.push({ TL, cur }); if (undoStack.length > 80) undoStack.shift(); }
+
+  // apply a change from the end of the tick on screen; anything recorded after it is discarded (Undo restores it)
+  function fork(change) {
+    stopPlay();
+    const end = tickEnd(cur), st = TL.steps[end];
+    pushUndo();
+    const lostTicks = TL.steps[TL.steps.length - 1].t - st.t;
+    TL = { steps: TL.steps.slice(0, end + 1), H: { done: TL.H.done.slice(0, st.nD) }, base: TL.base, seed: TL.seed, ops: TL.ops.filter(o => o.t <= st.t) };
+    sim = deep(st.sim); P = st.P;
+    const op = change(P);
+    op.msg += lostTicks > 0 ? ` The ${pl(lostTicks, 'tick')} recorded after tick ${st.t} were discarded (Ctrl+Z brings them back).` : '';
+    applyOp({ t: st.t, ...op });
+    cur = TL.steps.length - 1;
+    showStep(cur);
+  }
+  function setParam(patch, msg) { fork(p0 => { const p = { ...p0, ...patch }; return { P: p, msg: msg(p) }; }); }
+  function restartWith(patch, msg) {
+    stopPlay(); pushUndo();
+    const ticks = Math.max(20, Math.min(200, TL.steps[cur].t));
+    const p = { ...TL.steps[cur].P, ...patch };
+    startRun(p, ticks, `${msg(p)} The run was restarted from tick 0 and replayed for ${ticks} ticks.`);
+    shown = null; showStep(cur, false);
+  }
+  function restartEmpty() {
+    stopPlay(); pushUndo();
+    startRun(TL.steps[cur].P, 0);
+    shown = null; showStep(cur, false);
+  }
+  function applyPreset(key) {
+    const pr = PRESETS[key];
+    stopPlay(); pushUndo();
+    startRun({ ...P0, ...pr.P }, pr.ticks, `${pr.text} This run has been going for ${pr.ticks} ticks: press ▶ to continue, → to step, or ← to go back.`, SEED, pr.then);
+    shown = null; showStep(cur, false);
+  }
+  function undo() {
+    if (!undoStack.length) return;
+    stopPlay();
+    const u = undoStack.pop();
+    TL = u.TL; cur = u.cur;
+    sim = deep(TL.steps[TL.steps.length - 1].sim); P = TL.steps[TL.steps.length - 1].P;
+    shown = null; showStep(cur, false);
+    setMsg('Undone.');
+  }
+
+  // ---------- save and open ----------
+  const FILE_VERSION = 1;
+  function exportRun() {
+    const last = TL.steps[TL.steps.length - 1];
+    return { app: 'dispatching', version: FILE_VERSION, saved: new Date().toISOString(), note: $('saveNote').value.trim(),
+      seed: TL.seed, base: TL.base, ops: TL.ops, end: last.t, steps: TL.steps.length, cur, by: S.by,
+      at: { tick: TL.steps[cur].t, caption: TL.steps[cur].msg.replace(/<[^>]+>/g, '') } };
+  }
+  function saveRun() {
+    const data = exportRun(), name = `dispatching-tick-${data.at.tick}.json`;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setFileMsg(`Saved ${name}: the whole run up to tick ${data.end}, opening at tick ${data.at.tick}.`);
+  }
+  // parameters from a file are clamped to what the controls allow, so a hand-edited file cannot break the simulation
+  function cleanP(x) {
+    const p = { ...P0 }, src = x && typeof x === 'object' ? x : {};
+    const num = (k, lo, hi) => { const v = Math.round(Number(src[k])); if (Number.isFinite(v)) p[k] = Math.max(lo, Math.min(hi, v)); };
+    const pick = (k, ok) => { if (ok.includes(src[k])) p[k] = src[k]; };
+    num('thr1', 1, 3); num('thr2', 1, 3); num('pool', 1, 4); num('think', 0, 10); num('session', 1, INF); num('lat', 1, 4); num('cap', 1, 4);
+    pick('server', ['single', 'conn', 'req', 'pool', 'writer', 'orb']); pick('stub', ['single', 'lock', 'fifo', 'tag']);
+    pick('exec', ['const', 'uniform', 'bimodal', 'split']); pick('cb', ['none', 'some', 'all']); pick('cbTo', ['other', 'caller']); pick('cbIn', ['pool', 'reader']); num('cbPool', 1, 2);
+    for (const k of ['pause1', 'pause2']) if (k in src) p[k] = !!src[k];
+    return p;
+  }
+  function importRun(d) {
+    if (!d || d.app !== 'dispatching' || !Array.isArray(d.ops)) throw new Error('this is not a C/S Dispatching file');
+    if (d.version > FILE_VERSION) throw new Error('it was saved by a newer version of this page');
+    const end = Math.round(Number(d.end));
+    if (!(end >= 0 && end <= 8000)) throw new Error('its length is not valid');
+    const seed = Number.isInteger(d.seed) ? d.seed : SEED;
+    const ops = d.ops.slice(0, 2000).map(o => ({
+      t: Math.max(0, Math.min(end, Math.round(Number(o && o.t)) || 0)), P: cleanP(o && o.P),
+      msg: String((o && o.msg) ?? '').slice(0, 4000).replace(/<[^>]*>/g, '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    }));
+    for (let i = 1; i < ops.length; i++) if (ops[i].t < ops[i - 1].t) throw new Error('its changes are out of order');
+    stopPlay(); pushUndo();
+    P = cleanP(d.base); sim = newSim(P, seed); TL = newTimeline(P, seed);
+    recorder('info', OPEN_MSG);
+    for (const op of ops) {
+      while (sim.t < op.t && TL.steps.length < MAXSTEPS) simTick();
+      applyOp(op);
+    }
+    while (sim.t < end && TL.steps.length < MAXSTEPS) simTick();
+    const by = d.by === 'event' ? 'event' : 'tick';
+    S.by = by;
+    $('byTick').setAttribute('aria-pressed', String(by === 'tick'));
+    $('byEvent').setAttribute('aria-pressed', String(by === 'event'));
+    cur = Math.max(0, Math.min(TL.steps.length - 1, Math.round(Number(d.cur)) || 0));
+    $('saveNote').value = typeof d.note === 'string' ? d.note.slice(0, 2000) : '';
+    shown = null; showStep(cur, false);
+    const exact = d.steps === undefined || d.steps === TL.steps.length;
+    return { tick: TL.steps[cur].t, end, note: $('saveNote').value, exact };
+  }
+  function openFile(file) {
+    if (!file) return;
+    file.text().then(txt => {
+      const r = importRun(JSON.parse(txt));
+      setFileMsg(`Opened ${file.name} at tick ${r.tick} (recorded up to tick ${r.end}).${r.note ? ' Its note is shown above.' : ''}${r.exact ? '' : ' Warning: the replay differs from the saved run; it may come from another version of this page.'}`, !r.exact);
+    }).catch(err => setFileMsg(`Could not open ${file.name}: ${err.message}.`, true));
+  }
+  function setFileMsg(t, isErr) { const m = $('fileMsg'); m.textContent = t; m.classList.toggle('err', !!isErr); }
+  function setMsg(t, isErr) { const m = $('msg'); m.textContent = t; m.classList.toggle('err', !!isErr); }
+
+  // ---------- drawing ----------
+  // x layout: client threads | client's pending requests | network | per-connection server part | shared server part
+  const TW = 330, TH = 46, PITCH = 54, MW = 56, MH = 30, SP = 60;
+  const ROFF = 30;   // room above a client's middleware box for its title
+  const CX = 24, CRB = 366, NET0 = 616, NET1 = 882, SRB = 900, SX = 1270, W = 1640;
+  const f1 = v => (Math.round(v * 10) / 10).toString();
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const escT = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const DEFS = '<defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker></defs>';
+
+  function geom(P) {
+    const rows = c => nThreads(P, c) + (P.server === 'orb' ? 2 + (P.cbIn === 'pool' ? P.cbPool : 0) : !ownRead(P) ? 1 : 0);
+    let BH = Math.max(250, 46 + Math.max(rows(0), rows(1)) * PITCH + 12 + (P.server === 'orb' ? ROFF : 0));
+    // the server's shared column (pool, and in the symmetric design its pending table and a note) spans both bands
+    if (P.server === 'orb') BH = Math.max(BH, Math.ceil((224 + P.pool * PITCH + 18 + 64 + 6 * 21 + 20 - 30) / 2));
+    const top = [26, 26 + BH + 30];
+    return { BH, top, H: top[1] + BH + 8, upY: c => top[c] + 85, downY: c => top[c] + 160 };
+  }
+  const label = m => m.k === 'req' ? '#' + m.n : m.k === 'rep' ? '↩' + m.n : m.k === 'cb' ? 'cb' + m.n : m.k === 'cbr' ? '↩cb' + m.n : 'FIN';
+
+  function tview(th, s, P, cl) {
+    if (cl && cl.paused) return { badge: 'PAUSED', cls: 'paused' };
+    const now = th.didT === s.t;
+    if (th.role === 'app') {
+      if (now && th.did === 'returned') return th.gotWrong ? { badge: 'WRONG REPLY', cls: 'blocked' } : { badge: 'GOT REPLY', cls: 'run' };
+      if (th.st === 'think') return { badge: th.left ? `THINKING · ${th.left}` : 'THINKING', cls: 'idle' };
+      if (th.st === 'idle') return { badge: th.why === 'session' ? 'SESSION DONE' : 'NOT CONNECTED', cls: 'idle' };
+      if (th.why === 'reply') return now ? { badge: 'SENT', cls: 'run' } : { badge: `AWAITING ↩${th.call}`, cls: 'blocked' };
+      return { badge: { lock: 'LOCK', wlock: 'WRITE LOCK', full: 'CONN. FULL' }[th.why], cls: 'blocked' };
+    }
+    if (th.st === 'blocked') {
+      if (th.why === 'cb') return { badge: 'IN CALLBACK', cls: 'cb' };
+      return { badge: { accept: 'IN accept()', read: 'IN read()', wlock: 'WRITE LOCK', full: 'CONN. FULL' }[th.why], cls: th.why === 'accept' || th.why === 'read' ? 'idle' : 'blocked' };
+    }
+    if (th.role === 'creader' || th.role === 'cworker') {
+      if (th.job) return { badge: `CALLBACK ${th.done}/${CBCOST}`, cls: 'cb' };
+      if (now) return { badge: th.did === 'callback' ? 'CALLBACK DONE' : 'READ', cls: 'run' };
+      return { badge: th.role === 'cworker' ? 'WAITING FOR WORK' : 'NO CALLBACK', cls: 'idle' };
+    }
+    if (th.job) return now && th.did === 'read' ? { badge: 'READ', cls: 'run' } : { badge: `EXECUTING ${th.done}/${th.job.cost}`, cls: 'run' };
+    if (th.out) return { badge: now ? 'FINISHED' : 'REPLY READY', cls: 'run' };
+    if (now) return { badge: { accept: 'ACCEPTED', wrote: 'WROTE', finished: 'FINISHED', read: 'READ', eof: 'EOF' }[th.did] || 'RUNNING', cls: 'run' };
+    if (th.st === 'idle') return { badge: th.role === 'writer' || th.role === 'cwriter' ? 'QUEUE EMPTY' : 'WAITING FOR WORK', cls: 'idle' };
+    return { badge: 'RUNNING', cls: 'run' };
+  }
+
+  // every thread and message is an item keyed by a stable id, so it can be tweened between snapshots
+  function scene(st) {
+    const P = st.P, s = st.sim, g = geom(P), items = new Map(), t = s.t;
+    const hot = new Set(st.hbAll || st.hb), hl = st.hlAll || st.hl;
+    const chip = (m, x, y, extra) => items.set('m' + m.id, { type: 'm', x, y, w: MW, h: MH, k: m.k, n: m.n, lab: label(m), hot: hot.has(m.id), ...extra });
+    const inBox = (m, x, y, extra) => chip(m, x + TW - MW - 8, y + (TH - MH) / 2, extra);
+    const thread = (th, x, y, cl) => {
+      const v = tview(th, s, P, cl), prog = th.job && th.job.cost ? th.done / th.job.cost : -1;
+      items.set('t' + th.id, { type: 't', x, y, w: TW, h: TH, name: th.name, ...v, prog, ring: hl[th.id] || '' });
+      const m = th.out || th.job || th.msg || th.got;
+      if (m) inBox(m, x, y, { wrong: m === th.got && th.gotWrong });
+    };
+    const pos = {};   // where each server thread sits
+    for (const cl of s.clients) {
+      const top = g.top[cl.c], n = cl.threads.length;
+      cl.threads.forEach((th, i) => thread(th, CX, top + 40 + i * PITCH, cl));
+      const y0 = top + 40 + n * PITCH + (P.server === 'orb' ? ROFF : 0);
+      runtime(cl).forEach((th, i) => thread(th, CX, y0 + i * PITCH, cl));
+      if (cl.cwr) {   // the outgoing queue beside the writer, the work queue beside the first worker
+        cl.outq.slice(0, 3).forEach((m, i) => chip(m, CRB + 2 + i * SP, y0 + PITCH + (TH - MH) / 2));
+        cl.cbq.slice(0, 3).forEach((m, i) => chip(m, CRB + 2 + i * SP, y0 + 2 * PITCH + (TH - MH) / 2));
+      }
+    }
+    // messages travel along the lane; those that arrived wait at its far end, oldest first, until a thread reads them
+    const prog = x => Math.min(1, (t - x.sent + 0.5) / Math.max(1, x.arr - x.sent));
+    for (const k of s.conns) {
+      const up = g.upY(k.c), dn = g.downY(k.c);
+      const x0 = NET0 + 8, x1 = NET1 - 8 - MW;
+      let n = k.up.filter(x => x.arr <= t).length, i = 0;
+      const upEnd = Math.max(x0, x1 - n * SP);
+      for (const x of k.up) {
+        if (x.arr <= t) chip(x.m, x1 - i++ * SP, up - MH / 2);
+        else chip(x.m, x0 + prog(x) * (upEnd - x0), up - MH / 2);
+      }
+      n = k.down.filter(x => x.arr <= t).length; i = 0;
+      const dnEnd = Math.min(x1, x0 + n * SP);
+      for (const x of k.down) {
+        if (x.arr <= t) chip(x.m, x0 + i++ * SP, dn - MH / 2);
+        else chip(x.m, x1 - prog(x) * (x1 - dnEnd), dn - MH / 2);
+      }
+      k.outq.slice(0, 4).forEach((m, i) => chip(m, SRB + i * SP + 2, dn - MH / 2));
+    }
+    const top0 = g.top[0], rowY0 = top0 + (POOLED[P.server] ? 224 : 156);
+    let row = 0;
+    for (const th of s.srv.threads) {
+      const k = th.conn && s.conns.find(x => x.id === th.conn);
+      let x = SX, y;
+      if (th.role === 'acc' || (th.role === 'main' && !k)) y = top0 + 40;
+      else if (k && (th.role === 'main' || th.role === 'conn' || th.role === 'reader')) { x = SRB; y = g.top[k.c] + 62; }
+      else if (k && th.role === 'writer') { x = SRB; y = g.top[k.c] + 192; }
+      else y = rowY0 + row++ * PITCH;
+      pos[th.id] = { x, y };
+      thread(th, x, y, null);
+    }
+    s.srv.workq.slice(0, 6).forEach((m, i) => chip(m, SX + i * SP + 2, top0 + 170 - MH / 2));
+    return { items, g, pos };
+  }
+
+  function staticLayer(st, g) {
+    const P = st.P, s = st.sim, hl = st.hlAll || st.hl, t = s.t;
+    let o = '';
+    const frame = (x0, y0, x1, y1, title, cls = '') => `<rect class="host ${cls}" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" rx="12"/>` +
+      `<rect class="hostplate" x="${x0 + 14}" y="${y0 - 9}" width="${title.length * 9.6 + 16}" height="18"/><text class="hosttitle ${cls}" x="${x0 + 22}" y="${y0 + 4}">${title}</text>`;
+    const slots = (x, y, n, cls = '') => {
+      let r = '';
+      for (let i = 0; i < n; i++) r += `<rect class="slot" x="${x + i * SP + 2}" y="${y - MH / 2}" width="${MW}" height="${MH}" rx="5"/>`;
+      return r + `<rect class="qframe ${cls}" x="${x - 3}" y="${y - MH / 2 - 5}" width="${n * SP + 6}" height="${MH + 10}" rx="7"/>`;
+    };
+    const mini = (x, y, n, text) => `<g class="mini"><rect class="cell c${n % 8}" x="${x}" y="${y}" width="68" height="24" rx="4"/><text class="ct c${n % 8}" x="${x + 34}" y="${y + 12}" style="font-size:12.5px">${text}</text></g>`;
+    const stub = stubOf(P);
+    // clients
+    for (const cl of s.clients) {
+      const top = g.top[cl.c], paused = cl.paused;
+      const nthr = cl.threads.length;
+      o += `<g class="clickable" data-act="c${cl.c}"><rect class="hit" x="4" y="${top}" width="${NET0 - 8}" height="${g.BH}" rx="12"/>`;
+      o += frame(4, top, NET0 - 4, top + g.BH, `CLIENT ${cl.c + 1}${paused ? ' · PAUSED' : ''}`, paused ? 'paused' : hl['C' + cl.c] ? 's-' + hl['C' + cl.c] : '');
+      o += `<text class="hintclick" x="${NET0 - 16}" y="${top + 22}">${pl(nthr, 'thread')} · click to ${paused ? 'resume' : 'pause'}</text></g>`;
+      // how the client matches replies to the threads waiting for them
+      if (cl.st !== 'up') o += `<text class="lbl" x="${CRB}" y="${top + 56}">${cl.issued ? 'Disconnected: reconnecting soon' : 'Not connected yet'}</text>`;
+      else if (stub === 'single') {
+        o += `<text class="lbl" x="${CRB}" y="${top + 56}">One thread: it sends a request,</text><text class="lbl" x="${CRB}" y="${top + 78}">then reads the reply itself</text>`;
+      } else if (stub === 'lock') {
+        const h = cl.threads.find(x => x.id === cl.lock), q = cl.lockQ.map(id => cl.threads.find(x => x.id === id).name);
+        o += `<text class="lbl" x="${CRB}" y="${top + 56}">Connection lock: ${h ? `<tspan class="k">held by ${h.name}</tspan>` : '<tspan class="ok">free</tspan>'}</text>`;
+        o += `<text class="lbl" x="${CRB}" y="${top + 78}">${q.length ? `<tspan class="bad">waiting: ${q.join(', ')}</tspan>` : 'nobody waiting'}</text>`;
+      } else {
+        o += `<text class="lbl" x="${CRB}" y="${top + 56}">${P.server === 'orb' ? 'Pending table' : stub === 'fifo' ? 'Pending requests, oldest first' : 'Pending requests, by id'}${cl.pending.length ? '' : ': none'}</text>`;
+        cl.pending.slice(0, 6).forEach((p, i) => { o += mini(CRB + (i % 3) * 76, top + 66 + Math.floor(i / 3) * 28, p.call, `#${p.call}→${thName(s, p.tid)}`); });
+      }
+      if (cl.cwr) {   // the client's middleware, drawn with the same parts and names as the server's
+        const y0 = top + 40 + cl.threads.length * PITCH + ROFF, x1 = NET0 - 14;
+        o += `<rect class="sub" x="14" y="${y0 - 26}" width="${x1 - 14}" height="${top + g.BH - y0 + 16}" rx="9"/>`;
+        o += `<text class="subtitle" x="${CX}" y="${y0 - 8}">MIDDLEWARE · THE SAME PARTS AS THE SERVER</text>`;
+        o += `<text class="lbl" x="${CRB}" y="${y0 + 16}">replies → pending table</text>`;
+        o += `<text class="lbl" x="${CRB}" y="${y0 + 36}">${cl.workers.length ? 'requests → work queue' : '<tspan class="bad">requests: handled right here</tspan>'}</text>`;
+        const oy = y0 + PITCH + TH / 2;
+        o += `<text class="lbl" x="${CRB + 3 * SP + 8}" y="${oy - 4}">outgoing</text><text class="lbl" x="${CRB + 3 * SP + 8}" y="${oy + 14}">queue: <tspan class="k">${cl.outq.length}</tspan></text>`;
+        o += slots(CRB, oy, 3, 'user');
+        if (cl.workers.length) {
+          const wy = oy + PITCH;
+          o += `<text class="lbl" x="${CRB + 3 * SP + 8}" y="${wy - 4}">work</text><text class="lbl" x="${CRB + 3 * SP + 8}" y="${wy + 14}">queue: <tspan class="k">${cl.cbq.length}</tspan></text>`;
+          o += slots(CRB, wy, 3, 'user');
+        }
+      }
+    }
+    // network lanes
+    const orb = P.server === 'orb';
+    for (const c of [0, 1]) {
+      const up = g.upY(c), dn = g.downY(c);
+      o += `<line class="lane" x1="${NET0 + 2}" y1="${up}" x2="${NET1 - 2}" y2="${up}" marker-end="url(#arr)"/>`;
+      o += `<line class="lane" x1="${NET1 - 2}" y1="${dn}" x2="${NET0 + 2}" y2="${dn}" marker-end="url(#arr)"/>`;
+      o += `<text class="lanelab" x="${NET0 + 8}" y="${up - 22}">${orb ? 'requests, callback replies →' : 'requests →'}</text>`;
+      o += `<text class="lanelab" x="${NET1 - 8}" y="${dn + 34}" text-anchor="end">${orb ? '← replies, callbacks' : '← replies'}</text>`;
+      const k = s.conns.filter(x => x.c === c).pop();
+      if (k) {
+        const note = (pipe, x, y, anchor) => {
+          const n = pipe.filter(e => e.arr <= t).length, full = pipe.length >= P.cap;
+          return full || n ? `<text class="lbl" x="${x}" y="${y}" text-anchor="${anchor}">${full ? `<tspan class="bad">full: ${pl(P.cap, 'message')} in transit</tspan>` : `${n} unread`}</text>` : '';
+        };
+        o += note(k.up, NET1 - 8, up + 36, 'end') + note(k.down, NET0 + 8, dn - 24, 'start');
+      }
+    }
+    o += `<text class="subtitle" x="${(NET0 + NET1) / 2}" y="${g.top[0] + 4}" text-anchor="middle">NETWORK · ${pl(P.lat, 'TICK').toUpperCase()} EACH WAY</text>`;
+    // server
+    const SRVT = { single: 'single thread', conn: 'thread per connection', req: 'thread per request', pool: `pool of ${P.pool}`, writer: `pool of ${P.pool} + writers`, orb: `symmetric · pool of ${P.pool}` }[P.server];
+    o += frame(NET1, g.top[0], W - 4, g.top[1] + g.BH, `SERVER · ${SRVT.toUpperCase()}`);
+    for (const c of [0, 1]) {
+      const top = g.top[c], dn = g.downY(c);
+      const k = s.conns.filter(x => x.c === c).pop();
+      o += `<rect class="sub" x="${SRB - 10}" y="${top + 14}" width="${SX - SRB - 14}" height="${g.BH - 22}" rx="9"/>`;
+      o += `<text class="subtitle" x="${SRB}" y="${top + 34}">${k ? `CONNECTION ${k.id} · CLIENT ${c + 1}` : `NO CONNECTION FROM CLIENT ${c + 1}`}</text>`;
+      if (k) o += `<text class="lbl" x="${SRB}" y="${top + 52}">${k.accepted ? `accepted at tick ${k.tAcc}${k.eof ? ' · client closed it' : ''}` : k.tAvail <= t ? `<tspan class="bad">in the accept queue since tick ${k.tAvail}</tspan>` : `connecting (arrives at tick ${k.tAvail})`}</text>`;
+      if (WRITER[P.server]) {
+        const q = k ? k.outq.length : 0;
+        o += slots(SRB, dn, 4, 'user');
+        o += `<text class="lbl" x="${SRB}" y="${dn - 24}">Outgoing queue (user space): <tspan class="k">${q}</tspan></text>`;
+        if (q > 4) o += `<text class="more" x="${SRB + 4 * SP + 8}" y="${dn + 5}">+${q - 4}</text>`;
+      } else if (P.server === 'req' || P.server === 'pool') {
+        const h = k && k.wlock ? thName(s, k.wlock) : '', q = k ? k.wq.map(id => thName(s, id)) : [];
+        o += `<text class="lbl" x="${SRB}" y="${dn - 4}">Write lock for this connection: ${h ? `<tspan class="bad">held by ${h}</tspan>` : '<tspan class="ok">free</tspan>'}</text>`;
+        o += `<text class="lbl" x="${SRB}" y="${dn + 18}">${q.length ? `<tspan class="bad">waiting: ${q.join(', ')}</tspan>` : 'nobody waiting'}</text>`;
+      } else {
+        o += `<text class="lbl" x="${SRB}" y="${dn + 5}">${P.server === 'single' ? 'The main thread writes replies itself' : 'This connection\'s thread writes replies itself'}</text>`;
+      }
+    }
+    // shared part of the server
+    const top0 = g.top[0];
+    o += `<text class="subtitle" x="${SX}" y="${top0 + 30}">SHARED BY ALL CONNECTIONS</text>`;
+    const q = backlog(s);
+    o += `<text class="lbl" x="${SX}" y="${top0 + 110}">Accept queue: ${q.length ? `<tspan class="bad">${q.map(k => `Client ${k.c + 1} (since tick ${k.tAvail})`).join(', ')}</tspan>` : 'empty'}</text>`;
+    if (POOLED[P.server]) {
+      o += `<text class="lbl" x="${SX}" y="${top0 + 138}">Work queue: <tspan class="k">${s.srv.workq.length}</tspan>${s.srv.workq.length > 6 ? ` (first 6 shown)` : ''}</text>`;
+      o += slots(SX, top0 + 170, 6, 'user');
+      o += `<text class="lbl" x="${SX}" y="${top0 + 212}">Pool: ${pl(P.pool, 'worker')}</text>`;
+    } else if (P.server === 'req') {
+      const hs = s.srv.threads.filter(x => x.role === 'handler').length;
+      o += `<text class="lbl" x="${SX}" y="${top0 + 140}">Request threads alive: <tspan class="k">${hs}</tspan> · created so far: <tspan class="k">${s.c.hand}</tspan></text>`;
+    }
+    if (P.server === 'orb') {
+      const ids = Object.keys(s.srv.spend);
+      const y = top0 + 224 + P.pool * PITCH + 18;
+      o += `<text class="lbl" x="${SX}" y="${y}">Pending table${ids.length ? '' : ': none'}</text>`;
+      ids.slice(0, 4).forEach((id, i) => { o += mini(SX + i * 76, y + 10, +id, `cb${id}→${thName(s, s.srv.spend[id]).replace('Worker ', 'W')}`); });
+      const ny = Math.max(g.top[1] + 40, y + 64);
+      ['THE SAME MIDDLEWARE AS EACH CLIENT', 'Per connection: a reader and a writer,', 'with an outgoing queue. Shared: a work', 'queue, a pool, and a pending table.', 'Both ends export a service (handle)', 'and consume the other\'s (send).']
+        .forEach((ln, i) => { o += `<text class="${i ? 'lbl' : 'subtitle'}" x="${SX}" y="${ny + i * 21}">${ln}</text>`; });
+    }
+    return o;
+  }
+
+  function itemSvg(it) {
+    const op = it.op.toFixed(3);
+    if (it.type === 't') {
+      const bw = it.badge.length * 8.2 + 18;
+      let r = `<g class="st-${it.cls}" opacity="${op}">`;
+      if (it.ring) r += `<rect class="ring s-${it.ring}" x="${f1(it.x - 4)}" y="${f1(it.y - 4)}" width="${f1(it.w + 8)}" height="${f1(it.h + 8)}" rx="11"/>`;
+      r += `<rect class="tbox" x="${f1(it.x)}" y="${f1(it.y)}" width="${f1(it.w)}" height="${f1(it.h)}" rx="8"/>`;
+      r += `<text class="tname" x="${f1(it.x + 12)}" y="${f1(it.y + 28)}">${escT(it.name)}</text>`;
+      r += `<g class="badge"><rect x="${f1(it.x + 118)}" y="${f1(it.y + 12)}" width="${f1(bw)}" height="22" rx="11"/><text x="${f1(it.x + 127)}" y="${f1(it.y + 23)}">${escT(it.badge)}</text></g>`;
+      if (it.prog >= 0) r += `<rect class="prog" x="${f1(it.x + 10)}" y="${f1(it.y + it.h - 7)}" width="${f1(it.w - MW - 30)}" height="4" rx="2"/><rect class="prog done" x="${f1(it.x + 10)}" y="${f1(it.y + it.h - 7)}" width="${f1((it.w - MW - 30) * it.prog)}" height="4" rx="2"/>`;
+      return r + '</g>';
+    }
+    const cls = it.k === 'fin' ? 'fin' : 'c' + (it.n % 8), round = it.k === 'rep' || it.k === 'cbr';
+    const fs = it.lab.length > 4 ? 13 : 15;
+    return `<g class="msg${it.k === 'cb' || it.k === 'cbr' ? ' cbk' : ''}${it.hot ? ' hot' : ''}${it.wrong ? ' wrong' : ''}" opacity="${op}">` +
+      `<rect class="cell ${cls}" x="${f1(it.x)}" y="${f1(it.y)}" width="${f1(it.w)}" height="${f1(it.h)}" rx="${round ? 15 : 5}"/>` +
+      `<text class="ct ${cls}" x="${f1(it.x + it.w / 2)}" y="${f1(it.y + it.h / 2)}" style="font-size:${fs}px">${it.lab}</text>` +
+      (it.wrong ? `<text class="wrongx" x="${f1(it.x + it.w + 3)}" y="${f1(it.y + 12)}">✗</text>` : '') + '</g>';
+  }
+
+  let lastStat = '';
+  function render(target, from, t) {
+    const g = target.g, list2 = [];
+    for (const [id, p] of target.items) {
+      const o = from && from.items.get(id);
+      list2.push(o ? { ...p, x: lerp(o.x, p.x, t), y: lerp(o.y, p.y, t), op: 1 } : { ...p, op: from ? t : 1 });
+    }
+    if (from) for (const [id, o] of from.items) if (!target.items.has(id)) list2.push({ ...o, op: 1 - t });
+    list2.sort((a, b) => (a.type === 'm') - (b.type === 'm'));
+    const svg = $('svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${g.H}`);
+    const avail = Math.max(240, $('stage').clientWidth - 26);
+    const scale = Math.min(Math.max(avail / W, 0.3), 3) * S.zoom;
+    svg.style.width = f1(W * scale) + 'px';
+    svg.style.height = f1(g.H * scale) + 'px';
+    if (!svg.firstChild) svg.innerHTML = DEFS + '<g id="gStat"></g><g id="gDyn"></g>';
+    if (lastStat !== target.stat) { $('gStat').innerHTML = target.stat; lastStat = target.stat; }
+    $('gDyn').innerHTML = list2.map(itemSvg).join('');
+  }
+
+  // ---------- step playback ----------
+  const TAGS = {
+    call: ['Request', 'found'], send: ['Request sent', 'visit'], lock: ['Lock', 'bad'], wlock: ['Write lock', 'bad'], full: ['Connection full', 'bad'],
+    arrive: ['Arrive', 'visit'], connect: ['Connect', 'split'], accept: ['accept()', 'split'], close: ['close()', 'split'], eof: ['End of stream', 'split'],
+    read: ['Read request', 'visit'], spawn: ['New thread', 'split'], enqueue: ['Work queue', 'visit'], take: ['Worker', 'ok'],
+    done: ['Executed', 'ok'], reply: ['Reply sent', 'visit'], deliver: ['Reply received', 'ok'], wrong: ['Wrong reply', 'bad'],
+    callback: ['Callback', 'split'], cbin: ['Callback in', 'split'], cbrun: ['Callback runs', 'split'], cbreply: ['Callback result', 'split'], cbret: ['Callback done', 'split'],
+    pause: ['Paused', 'split'], resume: ['Resumed', 'ok'], tick: ['Quiet tick', 'info'], info: ['Info', 'info'], change: ['Change', 'info']
+  };
+  const tagHtml = kind => `<span class="tag t-${TAGS[kind][1]}">${TAGS[kind][0]}</span>`;
+
+  function decorate(i) {
+    // in tick mode the picture and caption cover every event of the tick
+    const st = TL.steps[i];
+    if (S.by === 'event') return { ...st, hbAll: null, hlAll: null, evs: [st] };
+    const a = tickStart(i), evs = TL.steps.slice(a, i + 1);
+    const hbAll = [], hlAll = {};
+    evs.forEach(e => { hbAll.push(...e.hb); Object.assign(hlAll, e.hl); });
+    return { ...st, hbAll, hlAll, evs };
+  }
+
+  function showStep(i, animate = true) {
+    i = Math.max(0, Math.min(TL.steps.length - 1, i));
+    cur = i;
+    const st = decorate(i);
+    const sc = scene(st);
+    sc.stat = staticLayer(st, sc.g);
+    const from = shown;
+    cancelAnimationFrame(rafId);
+    updateChrome(st);
+    const dur = (!animate || !from || reduceMotion.matches) ? 0 : Math.min(450, S.speed * 0.6);
+    shown = sc;
+    if (!dur) { render(sc, null, 1); return; }
+    const t0 = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now - t0) / dur);
+      const e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      render(sc, from, e);
+      if (t < 1) rafId = requestAnimationFrame(step);
+    };
+    render(sc, from, 0);
+    rafId = requestAnimationFrame(step);
+  }
+  function redraw() { if (TL.steps.length) { shown = null; showStep(cur, false); } }
+
+  function nextIdx() {
+    if (S.by === 'event') { if (cur + 1 >= TL.steps.length) simTick(); return cur + 1; }
+    const e = tickEnd(cur);
+    if (e > cur) return e;
+    if (cur + 1 >= TL.steps.length) simTick();
+    return tickEnd(cur + 1);
+  }
+  function prevIdx() { return S.by === 'event' ? Math.max(0, cur - 1) : Math.max(0, tickStart(cur) - 1); }
+  const canAdvance = () => cur < TL.steps.length - 1 || TL.steps.length < MAXSTEPS;
+  function advance() {
+    if (!canAdvance()) { stopPlay(); setMsg('Recording limit reached: restart to continue.', true); return false; }
+    showStep(nextIdx());
+    return true;
+  }
+  function schedule() {
+    clearTimeout(timer);
+    if (!playing) return;
+    timer = setTimeout(() => { if (advance()) schedule(); }, S.speed);
+  }
+  function stopPlay() { playing = false; clearTimeout(timer); updatePlayBtn(); }
+  function togglePlay() {
+    if (playing) { stopPlay(); return; }
+    playing = true; updatePlayBtn(); advance(); schedule();
+  }
+  function go(i) { stopPlay(); showStep(i); }
+  function fastForward(n) {
+    stopPlay();
+    if (cur < TL.steps.length - 1) { showStep(TL.steps.length - 1); return; }
+    for (let k = 0; k < n && TL.steps.length < MAXSTEPS; k++) simTick();
+    showStep(TL.steps.length - 1);
+  }
+  function updatePlayBtn() {
+    const b = $('playBtn');
+    b.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    b.innerHTML = playing
+      ? '<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M7 5v14l12-7z"/></svg>';
+  }
+
+  function updateChrome(st) {
+    const live = cur >= TL.steps.length - 1, last = TL.steps[TL.steps.length - 1].t;
+    const evIdx = cur - tickStart(cur) + 1, evN = tickEnd(cur) - tickStart(cur) + 1;
+    $('counter').innerHTML = `Tick ${st.t}${S.by === 'event' ? ` · event ${evIdx}/${evN}` : ''} · ` +
+      (live ? '<span class="live">● live</span>' : `<span class="replay">replay</span> (recorded to tick ${last})`);
+    $('caption').innerHTML = `<span class="tickno">TICK ${st.t}</span>` + (st.evs.length > 1
+      ? `<ul>${st.evs.map(e => `<li>${tagHtml(e.kind)}${e.msg}</li>`).join('')}</ul>`
+      : `${tagHtml(st.kind)}${st.msg}`);
+    $('firstBtn').disabled = $('prevBtn').disabled = cur === 0;
+    $('lastBtn').disabled = live;
+    $('nextBtn').disabled = !canAdvance();
+    $('undoBtn').disabled = !undoStack.length;
+    updatePlayBtn();
+    syncControls(st.P);
+    updateStats(st);
+    updateResp(st);
+    updateCode(st.P);
+    updateLog(st);
+    updateRules(st.P);
+  }
+
+  function updateStats(st) {
+    const c = st.sim.c;
+    $('stTick').textContent = st.t;
+    $('stC1').textContent = c.done[0];
+    $('stC2').textContent = c.done[1];
+    $('stThr').textContent = st.sim.srv.threads.length;
+    $('stPeak').textContent = `${c.peak}·${c.created}`;
+    $('stWrong').textContent = c.wrong;
+    $('stWrong').classList.toggle('bad', c.wrong > 0);
+  }
+
+  // response time: averages of each client's recent requests, then a timeline of recent requests, one cell per tick
+  const CATS = [['w', 'client'], ['n', 'network'], ['q', 'queued'], ['x', 'executing'], ['c', 'callback']];
+  const RECENT = 10, WIN = 60;
+  function updateResp(st) {
+    const done = TL.H.done.slice(0, st.nD), T = st.t;
+    const per = [0, 1].map(c => done.filter(x => x.c === c).slice(-RECENT));
+    const avgs = per.map(cs => cs.length ? cs.reduce((a, x) => a + x.trace.length, 0) / cs.length : 0);
+    const scale = Math.max(10, ...avgs);
+    let h = '';
+    per.forEach((cs, c) => {
+      const thr = done.filter(x => x.c === c && x.tDone > T - 40).length / Math.max(1, Math.min(40, T));
+      h += `<span class="who">Client ${c + 1}</span>`;
+      if (!cs.length) { h += '<span class="bar"></span><span class="meas">no reply yet</span>'; return; }
+      const cnt = ch => cs.reduce((a, x) => a + [...x.trace].filter(y => y === ch).length, 0) / cs.length;
+      h += `<span class="bar">${CATS.map(([ch]) => `<span class="g-${ch}" style="width:${f1(100 * cnt(ch) / scale)}%"></span>`).join('')}</span>`;
+      const wr = cs.filter(x => x.wrong).length;
+      h += `<span class="meas">last ${pl(cs.length, 'request')}: <b>${avgs[c].toFixed(1)}</b> ticks on average (${CATS.filter(([ch]) => cnt(ch) >= 0.05).map(([ch, nm]) => `${cnt(ch).toFixed(1)} ${nm}`).join(', ')}) · <b>${thr.toFixed(2)}</b> replies/tick${wr ? ` · <span style="color:var(--bad)">${wr} wrong</span>` : ''}</span>`;
+    });
+    $('resp').innerHTML = h;
+    // timeline
+    const active = Object.values(st.sim.calls);
+    const rows = done.filter(x => x.tDone > T - WIN).concat(active).sort((a, b) => a.id - b.id).slice(-16);
+    const LW = 170, CWD = 13, RW = 210, RH = 22, t0 = Math.max(1, T - WIN + 1);
+    const Wd = LW + WIN * CWD + RW, Hd = 24 + Math.max(1, rows.length) * RH + 6;
+    let o = '';
+    for (let tk = Math.ceil(t0 / 10) * 10; tk <= t0 + WIN - 1; tk += 10) {
+      const x = LW + (tk - t0) * CWD;
+      o += `<line class="gtick" x1="${x}" y1="16" x2="${x}" y2="${Hd}"/><text class="gax" x="${x + CWD / 2}" y="12">${tk}</text>`;
+    }
+    const xn = LW + (T - t0 + 1) * CWD;
+    o += `<line class="gnow" x1="${xn}" y1="16" x2="${xn}" y2="${Hd}"/>`;
+    if (!rows.length) o += `<text class="gend" x="${LW}" y="40">No request yet.</text>`;
+    rows.forEach((k, i) => {
+      const y = 22 + i * RH, isActive = !('tDone' in k) || k.tDone === undefined;
+      o += `<text class="glab" x="0" y="${y + 15}">#${k.id} C${k.c + 1}·${k.thr} ${k.op}</text>`;
+      [...k.trace].forEach((ch, j) => {
+        const tk = k.tCall + j;
+        if (tk < t0) return;
+        o += `<rect class="c${ch}" x="${LW + (tk - t0) * CWD + 0.5}" y="${y + 3}" width="${CWD - 1}" height="${RH - 7}" rx="2"/>`;
+      });
+      const xe = LW + Math.min(WIN, k.tCall + k.trace.length - t0) * CWD + 6;
+      o += isActive
+        ? `<text class="gend" x="${xe}" y="${y + 15}">in progress, ${k.trace.length} so far</text>`
+        : `<text class="gend${k.wrong ? ' bad' : ''}" x="${xe}" y="${y + 15}">${pl(k.trace.length, 'tick')}${k.by ? ` · ${k.by.replace('Worker ', 'W')}` : ''}${k.wrong ? ` · ✗ got ↩${k.got}` : ''}</text>`;
+    });
+    const g = $('gantt');
+    g.setAttribute('viewBox', `0 0 ${Wd} ${Hd}`);
+    g.innerHTML = o;
+  }
+
+  const CODE_CLI = {
+    single: `// Single-threaded client: send a request, wait for its reply
+var s = new Socket("server", 12345);
+var in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
+var out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+
+var req = ...                      // create a request
+req.writeTo(out);                  // fills the buffer: no system call yet
+out.flush();                       // the whole request, in one write
+Reply rep = Reply.readFrom(in);    // blocks until the reply arrives
+...                                // use the reply`,
+    lock: `// A connection shared by threads: one pending request at a time
+class Connection {
+  private final DataInputStream in;     // both over Buffered*Stream,
+  private final DataOutputStream out;   // as in the single-threaded client
+  private final ReentrantLock l = new ReentrantLock();
+
+  public Reply send(Request req) throws IOException {
+    l.lock();                      // other threads wait here
+    try {
+      req.writeTo(out); out.flush();
+      return Reply.readFrom(in);   // the sender reads its own reply
+    } finally {
+      l.unlock();
+    }
+  }
+}`,
+    fifo: `// A connection shared by threads: replies matched in order
+class Connection implements Runnable {   // (exceptions omitted)
+  private class Pending { Reply reply; final Condition c = l.newCondition(); }
+  private final ReentrantLock l = new ReentrantLock();   // guards pending
+  private final ReentrantLock wl = new ReentrantLock();  // one writer at a time
+  private final Deque<Pending> pending = new ArrayDeque<>();
+
+  public Reply send(Request req) {
+    var p = new Pending();
+    wl.lock();
+    try {
+      l.lock();
+      try { pending.addLast(p); } finally { l.unlock(); }  // in wire order
+      req.writeTo(out); out.flush();   // may block, but we no longer hold l
+    } finally { wl.unlock(); }
+    l.lock();
+    try {
+      while (p.reply == null) p.c.await();  // until the reader fills it in
+      return p.reply;
+    } finally { l.unlock(); }
+  }
+
+  public void run() {              // the reader thread
+    while (true) {
+      Reply rep = Reply.readFrom(in);
+      l.lock();
+      try {
+        Pending p = pending.removeFirst();   // the oldest
+        p.reply = rep;             // right only if replies come in order!
+        p.c.signal();
+      } finally { l.unlock(); }
+    }
+  }
+}`,
+    tag: `// A connection shared by threads: replies matched by request id
+class Connection implements Runnable {   // (exceptions omitted)
+  private class Pending { Reply reply; final Condition c = l.newCondition(); }
+  private final ReentrantLock l = new ReentrantLock();   // guards pending
+  private final ReentrantLock wl = new ReentrantLock();  // one writer at a time
+  private final Map<Integer, Pending> pending = new HashMap<>();
+  private int next = 0;
+
+  public Reply send(Request req) {
+    var p = new Pending();
+    int id;
+    l.lock();
+    try { id = next++; pending.put(id, p); } finally { l.unlock(); }  // before writing!
+    wl.lock();
+    try {
+      out.writeInt(id); req.writeTo(out); out.flush();   // may block, but we do not hold l
+    } finally { wl.unlock(); }
+    l.lock();
+    try {
+      while (p.reply == null) p.c.await();  // until the reader fills it in
+      return p.reply;
+    } finally { l.unlock(); }
+  }
+
+  public void run() {              // the reader thread
+    while (true) {
+      int id = in.readInt();
+      Reply rep = Reply.readFrom(in);
+      l.lock();
+      try {
+        Pending p = pending.remove(id);
+        p.reply = rep;
+        p.c.signal();              // wakes exactly the thread that sent id
+      } finally { l.unlock(); }
+    }
+  }
+}`,
+    orb: `// The middleware: one Endpoint per connection, the same class on both ends
+class Endpoint {                     // (exceptions omitted)
+  private class Pending { Message reply; final Condition c = l.newCondition(); }
+  private final ReentrantLock l = new ReentrantLock();   // guards pending and next
+  private final Map<Integer, Pending> pending = new HashMap<>();
+  private int next = 0;
+  private final BlockingQueue<Message> outq = new LinkedBlockingQueue<>();
+  private Handler handler;           // the service this end exports
+
+  // work: the queue of a pool of workers, or null to handle requests in the reader
+  Endpoint(Socket s, BlockingQueue<Runnable> work) {
+    new Thread(() -> {               // the writer: the only thread writing to out
+      while (true) {
+        outq.take().writeTo(out);
+        if (outq.isEmpty()) out.flush();   // a backlog leaves in one write
+      }
+    }).start();
+    new Thread(() -> {               // the reader
+      while (true) {
+        Message m = Message.readFrom(in);
+        if (m.isReply()) wake(m);                          // to the waiting thread
+        else if (work != null) work.add(() -> serve(m));   // a request: to the pool
+        else serve(m);                                     // ...or right here
+      }
+    }).start();
+  }
+
+  public void export(Handler h) { handler = h; }
+  private void serve(Message m) { outq.add(m.replyWith(handler.handle(m.request()))); }
+
+  public Reply send(Request req) {   // consumes the other end's service
+    var p = new Pending();
+    l.lock();
+    try {
+      int id = next++;
+      pending.put(id, p);
+      outq.add(Message.request(id, req));   // the writer sends it
+      while (p.reply == null) p.c.await();  // until the reader wakes us
+      return p.reply.reply();
+    } finally { l.unlock(); }
+  }
+
+  private void wake(Message m) {
+    l.lock();
+    try { Pending p = pending.remove(m.id); p.reply = m; p.c.signal(); }
+    finally { l.unlock(); }
+  }
+}`
+  };
+  const CODE_SRV = {
+    single: () => `// Single-threaded server: one client at a time
+var ss = new ServerSocket(12345);
+while (true) {
+  Socket s = ss.accept();          // the next client waits for this one
+  var in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
+  var out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
+  Request req;
+  while ((req = Request.readFrom(in)) != null) {  // null: end of stream
+    Reply rep = handle(req);
+    rep.writeTo(out); out.flush();   // the whole reply, in one write
+  }
+  s.close();
+}`,
+    conn: () => `// Thread per connection
+var ss = new ServerSocket(12345);
+while (true) {
+  Socket s = ss.accept();
+  new Thread(() -> {               // one thread per client
+    // in, out: over s, buffered as in the single-threaded server
+    Request req;
+    while ((req = Request.readFrom(in)) != null) {
+      handle(req).writeTo(out);    // one request at a time
+      out.flush();
+    }
+    s.close();
+  }).start();
+}`,
+    req: () => `// Thread per request, in each connection's reader thread
+var wl = new ReentrantLock();      // one per connection
+Request r;
+while ((r = Request.readFrom(in)) != null) {
+  Request req = r;
+  new Thread(() -> {               // a new thread for every request
+    Reply rep = handle(req);
+    wl.lock();                     // replies must not interleave
+    try { rep.writeTo(out); out.flush(); } finally { wl.unlock(); }
+  }).start();
+}
+s.close();`,
+    pool: n => `// Thread pool, shared by all connections (exceptions omitted)
+var work = new LinkedBlockingQueue<Runnable>();
+for (int i = 0; i < ${n}; i++)        // the workers
+  new Thread(() -> { while (true) work.take().run(); }).start();
+
+// in each connection's reader thread:
+var wl = new ReentrantLock();
+Request r;
+while ((r = Request.readFrom(in)) != null) {
+  Request req = r;
+  work.add(() -> {                 // waits in the queue for a free worker
+    Reply rep = handle(req);
+    wl.lock();                     // the worker writes the reply itself
+    try { rep.writeTo(out); out.flush(); } finally { wl.unlock(); }
+  });
+}
+s.close();`,
+    writer: n => `// Thread pool + a writer thread per connection (exceptions omitted)
+var work = new LinkedBlockingQueue<Runnable>();
+for (int i = 0; i < ${n}; i++)        // the workers
+  new Thread(() -> { while (true) work.take().run(); }).start();
+
+// for each connection:
+var outq = new LinkedBlockingQueue<Reply>();
+new Thread(() -> {                 // the only thread that writes to out
+  while (true) {
+    outq.take().writeTo(out);
+    if (outq.isEmpty()) out.flush();   // a backlog leaves in one write
+  }
+}).start();
+Request r;
+while ((r = Request.readFrom(in)) != null) {   // the reader thread
+  Request req = r;
+  work.add(() -> outq.add(handle(req)));       // never blocks on the connection
+}`,
+    orb: (n, cn) => `// Client: consumes the server's service, exports a listener
+var ep = new Endpoint(new Socket("server", 12345), ${cn ? `pool(${cn})` : 'null'});${cn ? '' : '  // null: callbacks in the reader'}
+ep.export(cb -> notify(cb));       // handles the server's callbacks
+while (true)
+  use(ep.send(nextRequest()));     // waits in the pending table
+
+// Server: exports its service, consumes each client's listener
+var work = pool(${n});                // one pool shared by all connections
+var ss = new ServerSocket(12345);
+while (true) {
+  var ep = new Endpoint(ss.accept(), work);
+  ep.export(req -> {
+    work(req);                     // half of the work...
+    client(req).send(callback(req));   // a request to a client: waits as a client does
+    return finish(req);            // ...and the rest
+  });
+}
+
+// a pool: n threads taking jobs from a work queue
+static BlockingQueue<Runnable> pool(int n) {
+  var work = new LinkedBlockingQueue<Runnable>();
+  for (int i = 0; i < n; i++)
+    new Thread(() -> { while (true) work.take().run(); }).start();
+  return work;
+}`
+  };
+  const hiJava = src => src.split('\n').map(line => {
+    const i = line.indexOf('//');
+    const body = (i < 0 ? line : line.slice(0, i)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\b(class|implements|private|public|static|final|new|var|void|int|boolean|for|while|if|else|try|finally|return|throws|true|null)\b/g, '<span class="kw">$1</span>');
+    return body + (i < 0 ? '' : `<span class="cm">${line.slice(i).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>`);
+  }).join('\n');
+  let lastCode = '';
+  function updateCode(P) {
+    const key = [P.server, stubOf(P), P.cbIn, P.pool, P.cbPool].join();
+    if (key === lastCode) return;
+    lastCode = key;
+    const orb = P.server === 'orb';
+    $('codeCliHead').textContent = orb ? 'Middleware: the same class on both ends (Java)' : 'Client (Java)';
+    $('codeSrvHead').textContent = orb ? 'Client and server, both using it (Java)' : 'Server dispatching (Java)';
+    $('codeCli').innerHTML = hiJava(orb ? CODE_CLI.orb : CODE_CLI[P.stub]);
+    $('codeSrv').innerHTML = hiJava(orb ? CODE_SRV.orb(P.pool, P.cbIn === 'pool' ? P.cbPool : 0) : CODE_SRV[P.server](P.pool));
+  }
+
+  function updateLog(st) {
+    const a = tickStart(Math.max(0, cur)), lo = Math.max(0, a - 50), hi = Math.min(TL.steps.length, tickEnd(cur) + 25);
+    let h = '';
+    for (let i = lo; i < hi; i++) {
+      const e = TL.steps[i];
+      const act = S.by === 'event' ? i === cur : (e.t === st.t && i <= cur && i >= a);
+      h += `<li data-i="${i}" tabindex="0"${act ? ' class="active"' : ''}><span class="n">t ${e.t}</span>${tagHtml(e.kind)}<span>${e.msg}</span></li>`;
+    }
+    $('log').innerHTML = h;
+    const box = $('logBox'), li = $('log').querySelector('li.active');
+    if (li && (li.offsetTop < box.scrollTop || li.offsetTop + li.offsetHeight > box.scrollTop + box.clientHeight))
+      box.scrollTop = li.offsetTop - box.clientHeight / 2;
+  }
+
+  const SRV_HINT = {
+    single: 'One thread does everything: accept(), then read, execute and reply for that client until it disconnects. Other clients wait in the accept queue.',
+    conn: 'accept() starts one thread per client. A client\'s requests run one at a time, in order; different clients run in parallel.',
+    req: 'A reader per connection starts a new thread for every request: as much concurrency as there are requests, replies in any order, written under a lock.',
+    pool: 'Readers put requests in one shared queue, served by a fixed pool of workers. Each worker writes its reply itself, under the connection\'s write lock.',
+    writer: 'As the pool, but workers put replies in a per-connection queue: a writer thread is the only one that writes to each socket.',
+    orb: 'Both ends look alike: a reader, a writer and a pending table on each side. Handlers can send requests to clients (callbacks); clients answer like servers.'
+  };
+  // matching replies in order is only correct if the server replies in order; it never reorders them
+  const mixUp = P => stubOf(P) === 'fifo' && ['req', 'pool', 'writer'].includes(P.server);
+  const STUB_HINT = {
+    single: 'Each client is one thread: it writes a request, blocks reading the reply, thinks, and repeats.',
+    lock: 'Threads share the connection under a lock held from write() until the reply is read: one pending request at a time, other threads queue on the lock.',
+    fifo: 'Threads write under a short lock and wait; a reader thread hands each reply to the oldest pending request. Correct only if the server replies in order, as a single thread or a thread per connection does.',
+    tag: 'Each request carries an id; the reader thread finds the waiting thread by id, so replies may come back in any order.'
+  };
+  function updateRules(P) {
+    const srv = { single: 'a single thread', conn: 'a thread per connection', req: 'a thread per request', pool: `a pool of ${pl(P.pool, 'worker')}`, writer: `a pool of ${pl(P.pool, 'worker')} and a writer thread per connection`, orb: `symmetric (ORB), with ${pl(P.pool, 'worker')}` }[P.server];
+    const cli = { single: 'a single thread each', lock: 'threads sharing one pending request', fifo: 'threads with pending requests matched in order', tag: 'threads with pending requests matched by id' }[stubOf(P)];
+    $('rules').innerHTML = `Two clients send requests to a server. The server <b>dispatches</b> each request to a thread that handles it, and the reply travels back to the client thread waiting for it. ` +
+      `Server: <b>${srv}</b>. Clients: <b>${cli}</b>.${P.server === 'orb' ? ' Handlers can also <b>send requests to clients</b> (callbacks) over the same connections.' : ''}` +
+      (mixUp(P) ? ' <span style="color:var(--bad)">This server can reply out of order, so threads may get each other\'s replies.</span>' : '');
+  }
+
+  // ---------- controls ----------
+  const ticksTxt = v => v === 0 ? 'none' : pl(v, 'tick');
+  const sessTxt = v => v >= INF ? '∞ (stay connected)' : String(v);
+  function syncControls(p) {
+    const set = (id, v) => { const el = $(id); if (el !== document.activeElement || el.type !== 'range') el.value = String(v); };
+    $('srvSel').value = p.server; $('srvTip').textContent = SRV_HINT[p.server];
+    $('poolField').hidden = !POOLED[p.server];
+    set('pool', p.pool); $('poolOut').textContent = String(p.pool);
+    $('stubSel').value = stubOf(p); $('stubSel').disabled = p.server === 'orb';
+    $('stubTip').textContent = STUB_HINT[stubOf(p)] + (p.server === 'orb' ? ' The symmetric server needs the pending table, so the clients use it.' : '');
+    $('thrFields').hidden = stubOf(p) === 'single';
+    $('mixWarn').hidden = !mixUp(p);
+    $('mixWarn').textContent = mixUp(p) ? `Replies can get mixed up: ${{ req: 'with a thread per request', pool: 'with a thread pool', writer: 'with a thread pool' }[p.server]}, one client's requests run at the same time, so a quick one can be answered before a slow one sent earlier, and a thread gets another thread's reply. The server does not reorder replies; use the pending table, or a single-threaded or thread-per-connection server.` : '';
+    set('thr1', p.thr1); $('thr1Out').textContent = String(p.thr1);
+    set('thr2', p.thr2); $('thr2Out').textContent = String(p.thr2);
+    $('cbCard').hidden = p.server !== 'orb';
+    $('cbSel').value = p.cb; $('cbToSel').value = p.cbTo; $('cbInSel').value = p.cbIn;
+    $('cbPoolField').hidden = p.cbIn !== 'pool'; set('cbPool', p.cbPool); $('cbPoolOut').textContent = String(p.cbPool);
+    $('execSel').value = p.exec;
+    set('think', p.think); $('thinkOut').textContent = ticksTxt(p.think);
+    $('sessionField').hidden = p.server === 'orb';
+    set('session', p.session); $('sessionOut').textContent = sessTxt(p.session);
+    set('lat', p.lat); $('latOut').textContent = pl(p.lat, 'tick');
+    set('cap', p.cap); $('capOut').textContent = pl(p.cap, 'message');
+    [['pause1', 'pause1'], ['pause2', 'pause2']].forEach(([id, k]) => {
+      $(id).setAttribute('aria-pressed', String(p[k])); $(id).textContent = p[k] ? 'Paused · resume' : 'Pause';
+    });
+    document.querySelectorAll('[data-preset]').forEach(b => {
+      const pr = PRESETS[b.dataset.preset], want = { ...P0, ...pr.P };
+      b.setAttribute('aria-pressed', String(Object.keys(want).every(k => k === 'pause1' || k === 'pause2' || p[k] === want[k])));
+    });
+  }
+
+  const live = (id, out, fmt) => $(id).addEventListener('input', e => { $(out).textContent = fmt(+e.target.value); });
+  live('pool', 'poolOut', String); live('thr1', 'thr1Out', String); live('thr2', 'thr2Out', String);
+  live('think', 'thinkOut', ticksTxt); live('session', 'sessionOut', sessTxt); live('lat', 'latOut', v => pl(v, 'tick')); live('cap', 'capOut', v => pl(v, 'message'));
+  const onChange = (id, f) => $(id).addEventListener('change', e => f(e.target));
+  const SRV_NAME = { single: 'a single thread', conn: 'a thread per connection', req: 'a thread per request', pool: 'a thread pool whose workers write their replies', writer: 'a thread pool plus a writer thread per connection', orb: 'the symmetric (ORB) design' };
+  onChange('srvSel', el => restartWith({ server: el.value }, p => `The server now uses ${SRV_NAME[p.server]}.`));
+  onChange('pool', el => restartWith({ pool: +el.value }, p => `The pool now has ${pl(p.pool, 'worker')}.`));
+  onChange('stubSel', el => restartWith({ stub: el.value }, p => `The clients now use ${{ single: 'a single thread each', lock: 'threads sharing one pending request', fifo: 'threads with a queue of pending requests, matched in order', tag: 'threads with a table of pending requests, matched by id' }[p.stub]}.`));
+  onChange('thr1', el => restartWith({ thr1: +el.value }, p => `Client 1 now has ${pl(p.thr1, 'thread')}.`));
+  onChange('thr2', el => restartWith({ thr2: +el.value }, p => `Client 2 now has ${pl(p.thr2, 'thread')}.`));
+  onChange('cbInSel', el => restartWith({ cbIn: el.value }, p => p.cbIn === 'reader' ? 'Clients now handle callbacks in their reader thread, with no pool.' : 'Clients now handle callbacks with a work queue and a pool, like the server.'));
+  onChange('cbPool', el => restartWith({ cbPool: +el.value }, p => `Each client\'s pool now has ${pl(p.cbPool, 'worker')}.`));
+  live('cbPool', 'cbPoolOut', String);
+  onChange('cbSel', el => setParam({ cb: el.value }, p => ({ none: 'Handlers no longer send callbacks.', some: 'About one handler in three now sends a client a callback.', all: 'Every handler now sends a client a callback.' }[p.cb] + ' This applies to new requests.')));
+  onChange('cbToSel', el => setParam({ cbTo: el.value }, p => p.cbTo === 'caller' ? 'Callbacks now go to the client that sent the request.' : 'Callbacks now go to the other client.'));
+  onChange('execSel', el => setParam({ exec: el.value }, p => `New requests now take ${({ const: '3 ticks each', uniform: '1 to 6 ticks, at random', bimodal: '1 tick, or sometimes 8', split: '6 ticks from Client 1 and 1 tick from Client 2' })[p.exec]} to execute.`));
+  onChange('think', el => setParam({ think: +el.value }, p => p.think ? `Client threads now think ${pl(p.think, 'tick')} between requests.` : 'Client threads now send the next request at once, with no think time.'));
+  onChange('session', el => setParam({ session: +el.value }, p => p.session >= INF ? 'Clients now stay connected.' : `Clients now disconnect after ${pl(p.session, 'request')} and reconnect.`));
+  onChange('lat', el => setParam({ lat: +el.value }, p => `The one-way latency is now ${pl(p.lat, 'tick')} for new messages.`));
+  onChange('cap', el => setParam({ cap: +el.value }, p => `Each connection now holds at most ${pl(p.cap, 'message')} in transit each way, travelling or unread.`));
+  const togglePause = k => {
+    const c = k === 'pause1' ? 1 : 2;
+    setParam({ [k]: !TL.steps[tickEnd(cur)].P[k] }, p => p[k] ? `You paused Client ${c}.` : `You resumed Client ${c}.`);
+  };
+  $('pause1').addEventListener('click', () => togglePause('pause1'));
+  $('pause2').addEventListener('click', () => togglePause('pause2'));
+  document.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+  $('undoBtn').addEventListener('click', undo);
+  $('restartBtn').addEventListener('click', restartEmpty);
+  $('saveBtn').addEventListener('click', saveRun);
+  $('openBtn').addEventListener('click', () => $('openFile').click());
+  $('openFile').addEventListener('change', e => { openFile(e.target.files[0]); e.target.value = ''; });
+  document.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+  document.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) { e.preventDefault(); openFile(f); } });
+
+  const setBy = by => {
+    S.by = by;
+    $('byTick').setAttribute('aria-pressed', String(by === 'tick'));
+    $('byEvent').setAttribute('aria-pressed', String(by === 'event'));
+    if (by === 'tick') cur = tickEnd(cur);
+    showStep(cur, false);
+  };
+  $('byTick').addEventListener('click', () => setBy('tick'));
+  $('byEvent').addEventListener('click', () => setBy('event'));
+  $('speed').addEventListener('input', e => { S.speed = +e.target.value; $('speedOut').textContent = (S.speed / 1000).toFixed(S.speed < 1000 ? 2 : 1) + ' s'; });
+  $('zoom').addEventListener('input', e => { S.zoom = +e.target.value / 100; $('zoomOut').textContent = e.target.value + '%'; redraw(); });
+
+  $('firstBtn').addEventListener('click', () => go(0));
+  $('prevBtn').addEventListener('click', () => go(prevIdx()));
+  $('nextBtn').addEventListener('click', () => { stopPlay(); advance(); });
+  $('lastBtn').addEventListener('click', () => go(TL.steps.length - 1));
+  $('ffBtn').addEventListener('click', () => fastForward(10));
+  $('playBtn').addEventListener('click', togglePlay);
+
+  $('log').addEventListener('click', e => { const li = e.target.closest('li'); if (li) go(+li.dataset.i); });
+  $('log').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { const li = e.target.closest('li'); if (li) { e.preventDefault(); go(+li.dataset.i); } }
+  });
+  $('svg').addEventListener('pointerdown', e => {
+    if (e.button) return;
+    const g = e.target.closest('[data-act]');
+    if (g) togglePause(g.dataset.act === 'c0' ? 'pause1' : 'pause2');
+  });
+
+  document.addEventListener('keydown', e => {
+    const tg = e.target instanceof Element ? e.target : document.body;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !tg.closest('input[type=text], textarea')) { e.preventDefault(); undo(); return; }
+    if (tg.closest('input, select, textarea, button, li')) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); stopPlay(); advance(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); go(prevIdx()); }
+    else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '1' || e.key === '2')) togglePause('pause' + e.key);
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'm') leftPane.toggle();
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'r') rightPane.toggle();
+  });
+
+  let rt = 0;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(redraw, 80); });
+
+  // side panes: hidden on request; then their screen edge, or focus moving into them, shows them over the page for a while
+  function pane(el, edge, btn, pin, cls, store, labels) {
+    let t = 0;
+    const off = () => document.body.classList.contains(cls);
+    const typing = () => el.contains(document.activeElement) && document.activeElement.matches('select, input[type=text], textarea');
+    function peek(on) {
+      clearTimeout(t);
+      if (on) { el.classList.add('peek'); return; }
+      t = setTimeout(() => { if (!el.matches(':hover') && !typing()) el.classList.remove('peek'); }, 300);
+    }
+    const mark = v => { btn.setAttribute('aria-pressed', String(v)); btn.setAttribute('aria-label', labels[v ? 1 : 0]); };
+    function set(v) {
+      document.body.classList.toggle(cls, v);
+      el.classList.remove('peek');
+      mark(v);
+      try { localStorage.setItem(store, v ? 'off' : 'on'); } catch (e) {}
+      redraw();
+    }
+    btn.addEventListener('click', () => set(!off()));
+    pin.addEventListener('click', () => set(false));
+    edge.addEventListener('mouseenter', () => peek(true));
+    edge.addEventListener('click', () => peek(true));
+    el.addEventListener('mouseenter', () => { if (off()) peek(true); });
+    el.addEventListener('mouseleave', () => peek(false));
+    el.addEventListener('focusin', () => { if (off()) peek(true); });
+    el.addEventListener('focusout', () => peek(false));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && el.classList.contains('peek')) { el.classList.remove('peek'); if (el.contains(document.activeElement)) document.activeElement.blur(); } });
+    try { if (localStorage.getItem(store) === 'off') { document.body.classList.add(cls); mark(true); } } catch (e) {}
+    return { toggle: () => set(!off()) };
+  }
+  const leftPane = pane($('rail'), $('railEdge'), $('railBtn'), $('pinBtn'), 'railoff', 'dispatching-rail', ['Hide settings', 'Show settings']);
+  const rightPane = pane($('side'), $('sideEdge'), $('sideBtn'), $('pinSide'), 'sideoff', 'dispatching-side', ['Hide the status and display pane', 'Show the status and display pane']);
+
+  // card info tips: hovering or focusing the (i) shows the tip; a click keeps it open until another click, a click elsewhere or Esc
+  let pinnedTip = null;
+  function showTip(b, on) { $(b.getAttribute('aria-controls')).hidden = !on; b.setAttribute('aria-expanded', String(on)); }
+  function unpinTip() { if (pinnedTip) { showTip(pinnedTip, false); pinnedTip = null; } }
+  document.querySelectorAll('.infobtn').forEach(b => {
+    const hover = on => { if (pinnedTip !== b) showTip(b, on); };
+    b.addEventListener('mouseenter', () => hover(true));
+    b.addEventListener('mouseleave', () => hover(false));
+    b.addEventListener('focus', () => hover(true));
+    b.addEventListener('blur', () => hover(false));
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      if (pinnedTip === b) { unpinTip(); return; }
+      unpinTip();
+      pinnedTip = b; showTip(b, true);
+    });
+  });
+  document.addEventListener('click', e => { if (pinnedTip && !e.target.closest('.tip')) unpinTip(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') unpinTip(); });
+
+
+  // theme toggle
+  const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+  const isDark = () => {
+    const a = document.documentElement.getAttribute('data-theme');
+    return a ? a === 'dark' : darkMQ.matches;
+  };
+  const syncThemeBtn = () => { $('themeBtn').textContent = isDark() ? 'Light mode' : 'Dark mode'; };
+  try { const saved = localStorage.getItem('dispatching-theme'); if (saved) document.documentElement.setAttribute('data-theme', saved); } catch (e) {}
+  $('themeBtn').addEventListener('click', () => {
+    const next = isDark() ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('dispatching-theme', next); } catch (e) {}
+    syncThemeBtn();
+  });
+  darkMQ.addEventListener && darkMQ.addEventListener('change', syncThemeBtn);
+  syncThemeBtn();
+
+  // sample run: the single-threaded server, Client 2 waiting its turn
+  const pr = PRESETS.single;
+  startRun({ ...P0, ...pr.P }, pr.ticks, `${pr.text} This run has been going for ${pr.ticks} ticks: press ▶ to continue, → to step, or ← to go back.`);
+  showStep(cur, false);
+})();
+</script>
+</body>
+</html>
