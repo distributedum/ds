@@ -30,6 +30,7 @@ Finally, a third component provides a general introduction to abstract system mo
 - [Agent skill](https://github.com/distributedum/sd-skill)
 - [Sockets demonstrator](materials/sockets.html)
 - [Serialization demonstrator](materials/serialization.html)
+- [Dispatching demonstrator](materials/dispatching.html)
 
 ## Past editions 
 
